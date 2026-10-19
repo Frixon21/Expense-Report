@@ -9,9 +9,13 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "db:backup": "node scripts/backup-db.mjs",
+    "db:restore-check": "node scripts/backup-db.mjs --verify",
+    "db:backup-self-test": "node scripts/backup-db.mjs --self-test"
   },
   "dependencies": {
+    "jose": "6.1.0",
     "lucide-react": "1.49.0",
     "next": "16.3.8",
     "pdf-lib": "1.17.1",
@@ -32,5 +36,8 @@
     "prettier": "3.9.9",
     "typescript": "7.0.2",
     "vitest": "5.0.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

@@ -1,4 +1,4 @@
-import { redirect } from "next/navigation";
+import DemoShell from "@/components/demo-shell";
 export default function Preview() {
-  redirect("/");
+  return <DemoShell />;
 }

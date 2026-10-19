@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useState } from "react";
+import PayPeriodNote from "@/components/pay-period-note";
 import { ChevronDown, ChevronRight, Download } from "lucide-react";
 import {
   ReceiptViewerModal,
@@ -213,7 +214,7 @@ export default function PayrollDashboard({
   );
   const [exportError, setExportError] = useState("");
   const [exportingId, setExportingId] = useState<string | null>(null);
-  const rangePresets = useMemo(() => dateRangePresets(), []);
+  const rangePresets = useMemo(() => dateRangePresets().filter((preset) => !preset.payrollDate), []);
   const currentPayPeriodIndex = useMemo(() => payPeriodIndexForDate(), []);
   const autoPayPeriod = useMemo(
     () => payPeriodAtIndex(currentPayPeriodIndex),
@@ -222,9 +223,8 @@ export default function PayrollDashboard({
   const selectedPeriodIndex = periodIndex ?? currentPayPeriodIndex;
 
   const applyPeriodIndex = (index: number) => {
-    const safe = Math.max(0, index);
-    const period = payPeriodAtIndex(safe);
-    setPeriodIndex(safe);
+    const period = payPeriodAtIndex(index);
+    setPeriodIndex(index);
     setFrom(period.from);
     setTo(period.to);
   };
@@ -477,7 +477,6 @@ export default function PayrollDashboard({
             <button
               type="button"
               className="preset-chip"
-              disabled={selectedPeriodIndex <= 0}
               onClick={() => applyPeriodIndex(selectedPeriodIndex - 1)}
             >
               Previous
@@ -499,6 +498,7 @@ export default function PayrollDashboard({
           </div>
         </div>
 
+        <PayPeriodNote from={from} to={to} />
         <div className="payroll-block">
           <h3 className="payroll-block-title">Quick filters</h3>
           <div className="preset-row">

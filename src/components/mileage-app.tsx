@@ -1,6 +1,7 @@
 "use client";
+import PayPeriodNote from "@/components/pay-period-note";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Download,
   FileUp,
@@ -145,12 +146,18 @@ function ProfileFields({
   );
 }
 
-function ProfileSetup({
+export function ProfileSetup({
   onSave,
   error,
+  historyContent,
+  embedded = false,
+  storageNote = "Records stay in this browser. Browser data can be cleared, so download a backup regularly.",
 }: {
-  onSave: (profile: Profile) => void;
+  onSave: (profile: Profile) => void | Promise<void>;
   error: string;
+  historyContent?: ReactNode;
+  embedded?: boolean;
+  storageNote?: string;
 }) {
   const [profile, setProfile] = useState<Profile>({
     driverName: "",
@@ -172,7 +179,7 @@ function ProfileSetup({
   return (
     <main className="setup-page">
       <div className="setup-wrap">
-        <Brand />
+        {!embedded && <Brand />}
         <section className="setup-card">
           <p className="section-kicker">LOCAL MILEAGE RECORD</p>
           <h1>Set up your mileage log</h1>
@@ -189,11 +196,9 @@ function ProfileSetup({
             )}
             <button className="primary">Save profile</button>
           </form>
-          <p className="storage-note">
-            Records stay in this browser. Browser data can be cleared, so
-            download a backup regularly.
-          </p>
+          <p className="storage-note">{storageNote}</p>
         </section>
+        {historyContent}
       </div>
     </main>
   );
@@ -223,11 +228,21 @@ export function Dashboard({
   onChange,
   storageError = "",
   payrollMeta = {},
+  storageLabel = "Saved in this browser",
+  footerNote = "Local browser storage | Download backups regularly | Supports recordkeeping, not tax advice",
+  onReport,
+  historyContent,
+  embedded = false,
 }: {
   state: MileageState;
-  onChange: (state: MileageState) => void;
+  onChange: (state: MileageState) => void | Promise<void>;
   storageError?: string;
   payrollMeta?: Record<string, TripPayrollMeta>;
+  storageLabel?: string;
+  footerNote?: string;
+  onReport?: (from: string, to: string) => Promise<Blob>;
+  historyContent?: ReactNode;
+  embedded?: boolean;
 }) {
   const itemMeta = (tripId: string) => payrollMeta[tripId] ?? defaultTripMeta();
   const suggestedStart = useMemo(() => {
@@ -276,7 +291,7 @@ export function Dashboard({
       setMessage("This trip was locked by payroll and can no longer be edited.");
     }
   }, [editing, payrollMeta, suggestedStart]);
-  const saveTrip = (event: FormEvent) => {
+  const saveTrip = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
     setMessage("");
@@ -300,10 +315,11 @@ export function Dashboard({
         createdAt: old?.createdAt ?? new Date().toISOString(),
       };
       const trips = [...state.trips.filter((item) => item.id !== trip.id), trip];
-      onChange({
+      const saveResult = onChange({
         ...state,
         trips,
       });
+      if (saveResult && typeof saveResult.then === "function") await saveResult;
       setMessage(editing ? "Trip updated." : "Trip saved.");
       reset(trips);
     } catch (err) {
@@ -342,9 +358,11 @@ export function Dashboard({
       return;
     }
     try {
-      const bytes = await createReport({ state, from, to });
+      const report = onReport
+        ? await onReport(from, to)
+        : new Blob([new Uint8Array(await createReport({ state, from, to }))], { type: "application/pdf" });
       downloadBlob(
-        new Blob([new Uint8Array(bytes)], { type: "application/pdf" }),
+        report,
         `${safeFilenamePart(state.profile!.driverName)}-mileage-${from}-${to}.pdf`,
       );
     } catch {
@@ -355,7 +373,7 @@ export function Dashboard({
   };
   return (
     <div className="app-shell">
-      <header className="topbar">
+      {!embedded && <header className="topbar">
         <Brand />
         <div className="header-right">
           <div className="user-name">
@@ -366,15 +384,15 @@ export function Dashboard({
             <Settings size={17} /> Settings
           </button>
         </div>
-      </header>
+      </header>}
       <main className="workspace">
         <div className="page-heading">
           <div>
             <p className="section-kicker">BUSINESS MILEAGE RECORD</p>
             <h1>Mileage log</h1>
-            <p>{state.profile?.businessName}</p>
+            <p>{embedded ? [state.profile?.driverName, state.profile?.vehicleDescription].filter(Boolean).join(" · ") : state.profile?.businessName}</p>
           </div>
-          <div className="storage-pill">Saved in this browser</div>
+          {embedded ? <button type="button" className="secondary" onClick={() => setSettings(true)}><Settings size={17} /> Settings</button> : <div className="storage-pill">{storageLabel}</div>}
         </div>
         <section className="summary-grid">
           <article>
@@ -576,6 +594,7 @@ export function Dashboard({
                 ))}
               </div>
             </div>
+            <PayPeriodNote from={from} to={to} />
             {from > to ? (
               <p className="empty-line">
                 Choose an end date on or after the start date.
@@ -650,12 +669,10 @@ export function Dashboard({
             )}
           </section>
         </div>
+        {historyContent}
         <footer className="workspace-footer">
           <span>Biztech Mileage Log</span>
-          <span>
-            Local browser storage · Download backups regularly · Supports
-            recordkeeping, not tax advice
-          </span>
+          <span>{footerNote}</span>
         </footer>
       </main>
       {settings && (
@@ -673,17 +690,22 @@ export function Dashboard({
           cancel="Keep trip"
           confirm="Delete trip"
           onCancel={() => setDeleting(null)}
-          onConfirm={() => {
+          onConfirm={async () => {
             if (isPayrollLocked(itemMeta(deleting.id))) {
               setDeleting(null);
               return;
             }
-            onChange({
-              ...state,
-              trips: state.trips.filter((trip) => trip.id !== deleting.id),
-            });
-            setDeleting(null);
-            if (editing === deleting.id) reset();
+            try {
+              const saveResult = onChange({
+                ...state,
+                trips: state.trips.filter((trip) => trip.id !== deleting.id),
+              });
+              if (saveResult && typeof saveResult.then === "function") await saveResult;
+              setDeleting(null);
+              if (editing === deleting.id) reset();
+            } catch (reason) {
+              setError(reason instanceof Error ? reason.message : "Could not delete this trip.");
+            }
           }}
         />
       )}
@@ -698,9 +720,9 @@ function SettingsPanel({
   onClear,
 }: {
   state: MileageState;
-  onChange: (state: MileageState) => void;
+  onChange: (state: MileageState) => void | Promise<void>;
   onClose: () => void;
-  onClear: () => void;
+  onClear: () => void | Promise<void>;
 }) {
   const [profile, setProfile] = useState(state.profile!);
   const current = new Date().getFullYear();
@@ -740,16 +762,21 @@ function SettingsPanel({
       record?.closing_tenths == null ? "" : String(record.closing_tenths / 10),
     );
   };
-  const saveProfile = () => {
+  const saveProfile = async () => {
     const parsed = profileSchema.safeParse(profile);
     if (!parsed.success)
       return setError(
         parsed.error.issues[0]?.message ?? "Complete the profile.",
       );
-    onChange({ ...state, profile: parsed.data });
-    setError("");
+    try {
+      const saveResult = onChange({ ...state, profile: parsed.data });
+      if (saveResult && typeof saveResult.then === "function") await saveResult;
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save profile.");
+    }
   };
-  const saveAnnual = () => {
+  const saveAnnual = async () => {
     const parsed = annualMileageInputSchema.safeParse({
       year,
       opening,
@@ -759,14 +786,19 @@ function SettingsPanel({
       return setError(
         parsed.error.issues[0]?.message ?? "Check annual mileage.",
       );
-    onChange({
-      ...state,
-      annualMileage: [
-        ...state.annualMileage.filter((item) => item.year !== year),
-        parsed.data,
-      ],
-    });
-    setError("");
+    try {
+      const saveResult = onChange({
+        ...state,
+        annualMileage: [
+          ...state.annualMileage.filter((item) => item.year !== year),
+          parsed.data,
+        ],
+      });
+      if (saveResult && typeof saveResult.then === "function") await saveResult;
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save annual mileage.");
+    }
   };
   const importBackup = async (file?: File) => {
     if (!file) return;
@@ -785,12 +817,17 @@ function SettingsPanel({
       setError((reason as Error).message);
     }
   };
-  const applyImport = () => {
+  const applyImport = async () => {
     if (!pendingImport) return;
-    onChange(pendingImport);
-    setProfile(pendingImport.profile ?? profile);
-    setPendingImport(null);
-    setError("");
+    try {
+      const saveResult = onChange(pendingImport);
+      if (saveResult && typeof saveResult.then === "function") await saveResult;
+      setProfile(pendingImport.profile ?? profile);
+      setPendingImport(null);
+      setError("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not import this backup.");
+    }
   };
   return (
     <div
@@ -960,7 +997,7 @@ function Confirm({
   cancel: string;
   confirm: string;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
 }) {
   return (
     <div className="modal-backdrop">
@@ -971,7 +1008,7 @@ function Confirm({
           <button className="secondary" onClick={onCancel}>
             {cancel}
           </button>
-          <button className="danger-button" onClick={onConfirm}>
+          <button className="danger-button" onClick={() => void onConfirm()}>
             {confirm}
           </button>
         </div>

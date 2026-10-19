@@ -25,6 +25,7 @@ export type PayrollReportInput = {
   from: string;
   to: string;
   dollarsPerMile: number;
+  tripRatesCentsPerMile?: Record<string, number>;
 };
 
 function printable(value: string, font: PDFFont) {
@@ -81,10 +82,14 @@ function lineDescription(line: PayrollLine) {
 function lineAmount(
   line: PayrollLine,
   dollarsPerMile: number,
+  tripRatesCentsPerMile: Record<string, number> = {},
 ): { primary: string; parkingTolls: string } {
   if (line.kind === "mileage") {
     const trip = line.trip;
-    const mileagePay = tripReimbursement(trip, dollarsPerMile);
+    const rate = tripRatesCentsPerMile[trip.id];
+    const mileagePay = rate === undefined
+      ? tripReimbursement(trip, dollarsPerMile)
+      : ((trip.end_tenths - trip.start_tenths) / 10) * (rate / 100);
     const parkingTolls = trip.parking_cents + trip.tolls_cents;
     return {
       primary: formatDollars(Math.round(mileagePay * 100)),
@@ -115,6 +120,7 @@ export async function createPayrollEmployeeReport({
   from,
   to,
   dollarsPerMile,
+  tripRatesCentsPerMile = {},
 }: PayrollReportInput): Promise<Uint8Array> {
   if (from > to)
     throw new Error("The report end date must follow its start date.");
@@ -138,7 +144,12 @@ export async function createPayrollEmployeeReport({
 
   const miles = totalBusinessMiles(visibleTrips);
   const mileagePay = visibleTrips.reduce(
-    (sum, trip) => sum + tripReimbursement(trip, dollarsPerMile),
+    (sum, trip) => {
+      const rate = tripRatesCentsPerMile[trip.id];
+      return sum + (rate === undefined
+        ? tripReimbursement(trip, dollarsPerMile)
+        : ((trip.end_tenths - trip.start_tenths) / 10) * (rate / 100));
+    },
     0,
   );
   const parkingTolls = visibleTrips.reduce(
@@ -248,7 +259,13 @@ export async function createPayrollEmployeeReport({
   y -= 16;
   drawText(`Report period: ${from} through ${to} (inclusive)`, 30, y);
   y -= 15;
-  drawText(`Mileage rate: $${dollarsPerMile.toFixed(2)}/mi`, 30, y);
+  drawText(
+    Object.keys(tripRatesCentsPerMile).length
+      ? "Mileage rate: saved processed rates, current dated rate for new claims"
+      : `Mileage rate: $${dollarsPerMile.toFixed(2)}/mi`,
+    30,
+    y,
+  );
   y -= 18;
   drawText(
     `Business miles: ${formatMiles(miles)}   Est. mileage pay: ${formatDollars(Math.round(mileagePay * 100))}`,
@@ -274,7 +291,7 @@ export async function createPayrollEmployeeReport({
 
   for (const line of lines) {
     const description = wrap(lineDescription(line), font, COL.descWidth, 7);
-    const amounts = lineAmount(line, dollarsPerMile);
+    const amounts = lineAmount(line, dollarsPerMile, tripRatesCentsPerMile);
     const status = wrap(lineStatus(employee, line), font, 78, 7);
     const extras = wrap(amounts.parkingTolls, font, 72, 7);
     const height = Math.max(

@@ -1,10 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 async function setup(page: Page) {
-  await page.goto("/");
-  await page.getByLabel("Driver full name").fill("Alex Morgan");
-  await page.getByLabel("Vehicle description").fill("2023 Toyota Camry");
-  await page.getByLabel("First used for business").fill("2026-01-01");
-  await page.getByRole("button", { name: "Save profile" }).click();
+  await page.goto("/preview");
+  await expect(page.getByRole("button", { name: "Save trip" })).toBeVisible();
 }
 test("mobile mileage records persist across reload and can be edited and deleted", async ({
   page,
@@ -59,7 +56,7 @@ test("payroll date controls stay grouped without excess vertical space", async (
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/");
+  await page.goto("/preview");
   await page.getByRole("tab", { name: "Payroll" }).click();
 
   const heading = page.getByRole("heading", { name: "Custom date range" });

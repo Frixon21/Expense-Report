@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { payPeriodDatePresets } from "./pay-period";
 
 export const safeFilenamePart = (value: string) =>
   value
@@ -202,6 +203,7 @@ export type DateRangePreset = {
   label: string;
   from: string;
   to: string;
+  payrollDate?: string;
 };
 
 export const dateRangePresets = (reference = new Date()): DateRangePreset[] => {
@@ -220,5 +222,6 @@ export const dateRangePresets = (reference = new Date()): DateRangePreset[] => {
       from: `${year}-01-01`,
       to: `${year}-12-31`,
     },
+    ...payPeriodDatePresets(reference),
   ];
 };

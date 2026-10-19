@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Pencil, Trash2, X } from "lucide-react";
 import {
   ReceiptViewerModal,
@@ -19,6 +19,7 @@ import {
 } from "@/lib/expense";
 import { dateRangePresets } from "@/lib/model";
 import { newId } from "@/lib/new-id";
+import PayPeriodNote from "@/components/pay-period-note";
 import { today, monthStart, monthEnd } from "@/lib/date-defaults";
 import {
   defaultTripMeta,
@@ -54,11 +55,15 @@ export default function ExpenseDashboard({
   onChange,
   storageError = "",
   payrollMeta = {},
+  storageLabel = "Saved in this browser",
+  historyContent,
 }: {
   expenses: Expense[];
-  onChange: (expenses: Expense[]) => void;
+  onChange: (expenses: Expense[]) => void | Promise<void>;
   storageError?: string;
   payrollMeta?: Record<string, TripPayrollMeta>;
+  storageLabel?: string;
+  historyContent?: ReactNode;
 }) {
   const itemMeta = (expenseId: string) =>
     payrollMeta[expenseId] ?? defaultTripMeta();
@@ -116,7 +121,7 @@ export default function ExpenseDashboard({
     }
   }, [editing, payrollMeta]);
 
-  const saveExpense = (event: FormEvent) => {
+  const saveExpense = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
     setMessage("");
@@ -147,10 +152,11 @@ export default function ExpenseDashboard({
             }
           : {}),
       };
-      onChange([
+      const saveResult = onChange([
         ...expenses.filter((item) => item.id !== record.id),
         record,
       ]);
+      if (saveResult && typeof saveResult.then === "function") await saveResult;
       setMessage(editing ? "Expense updated." : "Expense saved.");
       reset();
     } catch (err) {
@@ -205,7 +211,7 @@ export default function ExpenseDashboard({
           <h1>Expenses</h1>
           <p>Card, cash, and other reimbursable business purchases.</p>
         </div>
-        <div className="storage-pill">Saved in this browser</div>
+        <div className="storage-pill">{storageLabel}</div>
       </div>
 
       <section className="summary-grid expense-summary">
@@ -419,6 +425,7 @@ export default function ExpenseDashboard({
               ))}
             </div>
           </div>
+          <PayPeriodNote from={from} to={to} />
           {from > to ? (
             <p className="empty-line">Choose an end date on or after the start date.</p>
           ) : visible.length ? (
@@ -510,6 +517,8 @@ export default function ExpenseDashboard({
         </section>
       </div>
 
+      {historyContent}
+
       <footer className="workspace-footer">
         <span>Biztech Expense Report</span>
         <span>Supports recordkeeping, not tax advice</span>
@@ -524,21 +533,26 @@ export default function ExpenseDashboard({
         <div className="modal-backdrop">
           <div className="modal" role="dialog" aria-modal="true">
             <h2>Delete this expense?</h2>
-            <p>This removes the record from this browser.</p>
+            <p>This deletes the submitted expense and its receipt.</p>
             <div className="modal-actions">
               <button className="secondary" onClick={() => setDeleting(null)}>
                 Keep expense
               </button>
               <button
                 className="danger-button"
-                onClick={() => {
+                onClick={async () => {
                   if (isPayrollLocked(itemMeta(deleting.id))) {
                     setDeleting(null);
                     return;
                   }
-                  onChange(expenses.filter((item) => item.id !== deleting.id));
-                  setDeleting(null);
-                  if (editing === deleting.id) reset();
+                  try {
+                    const saveResult = onChange(expenses.filter((item) => item.id !== deleting.id));
+                    if (saveResult && typeof saveResult.then === "function") await saveResult;
+                    setDeleting(null);
+                    if (editing === deleting.id) reset();
+                  } catch (reason) {
+                    setError(reason instanceof Error ? reason.message : "Could not delete this expense.");
+                  }
                 }}
               >
                 Delete expense

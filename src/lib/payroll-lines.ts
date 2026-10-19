@@ -17,12 +17,17 @@ export type PayrollExpenseLine = {
 
 export type PayrollLine = PayrollMileageLine | PayrollExpenseLine;
 
+/** PDF inclusion is date-only and inclusive, for every status (including unpaid and voided). */
+export function isPayrollRecordInRange(date: string, from: string, to: string) {
+  return date >= from && date <= to;
+}
+
 const sortKey = (date: string, createdAt: string, suffix: string) =>
   `${date}T${createdAt}${suffix}`;
 
 export function tripsInPayrollRange(trips: Trip[], from: string, to: string) {
   return trips
-    .filter((trip) => trip.date >= from && trip.date <= to)
+    .filter((trip) => isPayrollRecordInRange(trip.date, from, to))
     .sort(
       (a, b) =>
         a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt),
@@ -35,7 +40,7 @@ export function expensesInPayrollRange(
   to: string,
 ) {
   return expenses
-    .filter((item) => item.date >= from && item.date <= to)
+    .filter((item) => isPayrollRecordInRange(item.date, from, to))
     .sort(
       (a, b) =>
         a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt),

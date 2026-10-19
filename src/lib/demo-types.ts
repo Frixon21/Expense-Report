@@ -5,6 +5,7 @@ export type TripPayrollMeta = {
   processed: boolean;
   paid: boolean;
   paidNote?: string;
+  processedRateCentsPerMile?: number | null;
 };
 
 export type DemoEmployee = {

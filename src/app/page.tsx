@@ -1,4 +1,4 @@
-import DemoShell from "@/components/demo-shell";
+import SecureShell from "@/components/secure-shell";
 export default function Home() {
-  return <DemoShell />;
+  return <SecureShell />;
 }

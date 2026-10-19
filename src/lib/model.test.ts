@@ -150,7 +150,7 @@ describe("local mileage data", () => {
     ).toBe(false);
     expect(
       dateRangePresets(new Date("2026-09-15T12:00:00Z")).map((preset) => preset.id),
-    ).toEqual(["today", "month", "ytd", "tax-year"]);
+    ).toEqual(["today", "month", "ytd", "tax-year", "current-pay-period", "previous-pay-period"]);
   });
 
   it("rejects malformed imported application state", () => {
