@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { expenseRecordSchema, MAX_RECEIPT_BYTES, type Expense } from "@/lib/expense";
 import { mileageStateSchema, tripRecordSchema, type MileageState, type Trip } from "@/lib/model";
+import { isIsoDate, isoDateSchema } from "@/lib/iso-date";
 import { database, getUser, hasRole, recordAudit, recordHistory, withTransaction, type AppUser, type Role } from "./db";
 
 const employeeSubmissionSchema = z.object({
@@ -52,6 +53,13 @@ type DbTrip = {
   updated_at: string;
 };
 
+// Snapshot responses expose receipt metadata and an authorized URL, never receipt bytes.
+const expenseMetadataColumns = `id, user_id, date, category, amount, payment_method, merchant,
+  business_purpose, project_or_client, notes, receipt_file_name, receipt_mime_type,
+  status, ever_processed, processed_by, paid_by, created_at, updated_at`;
+
+type MileageRate = { id: string; effective_from: string; cents_per_mile: number; created_at: string };
+
 export type RecordStatus = "Submitted" | "Processed" | "Paid" | "Voided";
 
 export class HttpError extends Error {
@@ -64,17 +72,25 @@ function nonEmptyChange<T>(oldValue: T, newValue: T) {
   return JSON.stringify(oldValue) !== JSON.stringify(newValue);
 }
 
+function allowedReceiptMimeType(value: string) {
+  return /^image\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(value) || value === "application/pdf" || value === "application/octet-stream";
+}
+
 function assertReceiptDataUrl(value: string, mimeType: string | undefined) {
   const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]*)$/s.exec(value);
   if (!match) throw new HttpError(400, "Receipt must be a base64 encoded image or PDF.");
-  const mediaType = (mimeType || match[1]).toLowerCase();
-  if (!(mediaType.startsWith("image/") || mediaType === "application/pdf" || mediaType === "application/octet-stream")) {
+  const mediaType = match[1].toLowerCase();
+  if (!allowedReceiptMimeType(mediaType) || (mimeType !== undefined && mimeType.toLowerCase() !== mediaType)) {
     throw new HttpError(400, "Use a photo (JPG, PNG, etc.) or PDF.");
   }
   const base64 = match[2].replace(/\s/g, "");
+  if (!base64 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)
+    || Buffer.from(base64.slice(-4), "base64").toString("base64") !== base64.slice(-4)) {
+    throw new HttpError(400, "Receipt must contain valid base64 data.");
+  }
   const bytes = Math.max(0, Math.floor((base64.length * 3) / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0));
   if (bytes > MAX_RECEIPT_BYTES) throw new HttpError(413, "Receipt must be 50 MB or smaller.");
-  return { dataUrl: value, mimeType: mediaType };
+  return { dataUrl: `data:${mediaType};base64,${base64}`, mimeType: mediaType };
 }
 
 function tripValue(trip: Trip) {
@@ -114,7 +130,7 @@ function readJson(value: string | null) {
   }
 }
 
-function mapExpense(row: DbExpense, includeData = false) {
+function mapExpense(row: Omit<DbExpense, "receipt_data_url">) {
   return {
     id: row.id,
     createdAt: row.created_at,
@@ -133,7 +149,6 @@ function mapExpense(row: DbExpense, includeData = false) {
     everProcessed: Boolean(row.ever_processed),
     processedBy: row.processed_by,
     paidBy: row.paid_by,
-    ...(includeData && row.receipt_data_url ? { _receiptDataUrl: row.receipt_data_url } : {}),
   };
 }
 
@@ -183,7 +198,7 @@ export function loadEmployeeSnapshot(db: DatabaseSync, userId: string) {
     closing_tenths: number | null;
   }>;
   const trips = db.prepare("SELECT * FROM trips WHERE user_id = ? ORDER BY date DESC, created_at DESC").all(userId) as unknown as DbTrip[];
-  const expenses = db.prepare("SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC, created_at DESC").all(userId) as unknown as DbExpense[];
+  const expenses = db.prepare(`SELECT ${expenseMetadataColumns} FROM expenses WHERE user_id = ? ORDER BY date DESC, created_at DESC`).all(userId) as unknown as DbExpense[];
   return {
     state: {
       version: 1 as const,
@@ -321,6 +336,9 @@ export function saveEmployeeSnapshot(user: AppUser, body: unknown) {
       };
       const deleteReceipt = removeReceipts.has(expense.id);
       const inputHasReceipt = expense.receiptDataUrl?.startsWith("data:") ?? false;
+      if (old.receipt_data_url && !deleteReceipt && !inputHasReceipt && expense.receiptMimeType !== undefined && expense.receiptMimeType !== old.receipt_mime_type) {
+        throw new HttpError(400, "Upload a replacement receipt to change its content type.");
+      }
       const receiptChanged = deleteReceipt || inputHasReceipt;
       if (nonEmptyChange(oldValue, value) || receiptChanged) {
         if (old.status !== "Submitted") throw new HttpError(409, "Processed expenses cannot be edited.");
@@ -356,6 +374,15 @@ function currentRate(db: DatabaseSync, date: string) {
     .get(date) as { cents_per_mile: number } | undefined;
 }
 
+export function payrollRates(user: AppUser): MileageRate[] {
+  activePayrollCheck(user);
+  return database().prepare("SELECT id, effective_from, cents_per_mile, created_at FROM mileage_rates ORDER BY effective_from DESC").all() as MileageRate[];
+}
+
+export function tripRateCentsPerMile(rates: MileageRate[], date: string, storedRate: number | null) {
+  return storedRate ?? rates.find((rate) => rate.effective_from <= date)?.cents_per_mile ?? null;
+}
+
 export function payrollSnapshot(user: AppUser) {
   activePayrollCheck(user);
   const db = database();
@@ -363,10 +390,10 @@ export function payrollSnapshot(user: AppUser) {
     FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.access_status = 'active' ORDER BY u.display_name`).all() as Array<{
       id: string; display_name: string; email: string | null; access_status: string; profile_json: string | null;
     }>;
-  const rates = db.prepare("SELECT id, effective_from, cents_per_mile, created_at FROM mileage_rates ORDER BY effective_from DESC").all();
+  const rates = payrollRates(user);
   const trips = db.prepare(`SELECT t.*, u.display_name AS owner_name FROM trips t JOIN users u ON u.id = t.user_id
     ORDER BY t.date DESC, t.created_at DESC`).all() as unknown as Array<DbTrip & { owner_name: string }>;
-  const expenses = db.prepare(`SELECT e.*, u.display_name AS owner_name FROM expenses e JOIN users u ON u.id = e.user_id
+  const expenses = db.prepare(`SELECT ${expenseMetadataColumns.split(",").map((column) => "e." + column.trim()).join(", ")}, u.display_name AS owner_name FROM expenses e JOIN users u ON u.id = e.user_id
     ORDER BY e.date DESC, e.created_at DESC`).all() as unknown as Array<DbExpense & { owner_name: string }>;
   const history = db.prepare(`SELECT h.id, h.record_type, h.record_id, h.owner_id, h.actor_id, h.action, h.from_status,
       h.to_status, h.reason, h.details_json, h.created_at, owner.display_name AS owner_name, actor.display_name AS actor_name
@@ -377,7 +404,7 @@ export function payrollSnapshot(user: AppUser) {
     rates,
     trips: trips.map((row) => {
       const storedRate = row.processed_rate_cents_per_mile;
-      const rate = storedRate ?? currentRate(db, row.date)?.cents_per_mile ?? null;
+      const rate = tripRateCentsPerMile(rates, row.date, storedRate);
       const miles = row.end_tenths - row.start_tenths;
       const mileageCents = rate === null ? null : Math.round((miles * rate) / 10);
       return {
@@ -496,7 +523,7 @@ export function transitionPayrollRecord(user: AppUser, input: unknown) {
 
 export function createMileageRate(user: AppUser, input: unknown) {
   activePayrollCheck(user);
-  const parsed = z.object({ effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), centsPerMile: z.number().int().min(1).max(1000) }).safeParse(input);
+  const parsed = z.object({ effectiveFrom: isoDateSchema, centsPerMile: z.number().int().min(1).max(1000) }).safeParse(input);
   if (!parsed.success) throw new HttpError(400, parsed.error.issues[0]?.message ?? "Invalid mileage rate.");
   const db = database();
   const now = new Date().toISOString();
@@ -510,7 +537,7 @@ export function createMileageRate(user: AppUser, input: unknown) {
     if (String(error).includes("UNIQUE constraint failed")) throw new HttpError(409, "A mileage rate already exists for that date.");
     throw error;
   }
-  return payrollSnapshot(user).rates;
+  return payrollRates(user);
 }
 
 function requireAdmin(user: AppUser) {
@@ -642,12 +669,6 @@ export type SecurityAuditFilters = {
   page?: number;
 };
 
-function isIsoDate(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
-
 function auditTextFilter(value: string | undefined) {
   return value?.trim().slice(0, 160) ?? "";
 }
@@ -737,11 +758,14 @@ export function receiptForUser(user: AppUser, expenseId: string) {
   if (!match) throw new HttpError(500, "Receipt data is invalid.");
   const bytes = Buffer.from(match[2], "base64");
   if (bytes.byteLength > MAX_RECEIPT_BYTES) throw new HttpError(500, "Receipt data exceeds the allowed size.");
-  return { bytes, mimeType: row.receipt_mime_type ?? match[1], fileName: row.receipt_file_name ?? "receipt" };
+  const declaredType = (row.receipt_mime_type ?? match[1]).toLowerCase();
+  // Legacy rows remain downloadable, but executable/mismatched MIME metadata is never served inline.
+  const mimeType = allowedReceiptMimeType(declaredType) && declaredType === match[1].toLowerCase() ? declaredType : "application/octet-stream";
+  return { bytes, mimeType, fileName: row.receipt_file_name ?? "receipt" };
 }
 
 export function directOwnerExpense(user: AppUser, expenseId: string) {
-  const row = database().prepare("SELECT * FROM expenses WHERE id = ? AND user_id = ?").get(expenseId, user.id) as unknown as DbExpense | undefined;
+  const row = database().prepare(`SELECT ${expenseMetadataColumns} FROM expenses WHERE id = ? AND user_id = ?`).get(expenseId, user.id) as unknown as DbExpense | undefined;
   if (!row) throw new HttpError(404, "Expense not found.");
   return mapExpense(row);
 }

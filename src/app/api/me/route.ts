@@ -1,7 +1,6 @@
-import { currentUser } from "@/lib/server/auth";
-import { loadEmployeeSnapshot, saveEmployeeSnapshot, ensureEmployee, HttpError } from "@/lib/server/records";
+import { loadEmployeeSnapshot, saveEmployeeSnapshot, ensureEmployee } from "@/lib/server/records";
 import { database } from "@/lib/server/db";
-import { privateError, privateJson, requestJson, requireProtectedMutation, requireUser } from "@/lib/server/http";
+import { MAX_EMPLOYEE_REQUEST_BYTES, privateError, privateJson, requestJson, requireProtectedMutation, requireUser } from "@/lib/server/http";
 
 export const runtime = "nodejs";
 
@@ -20,7 +19,7 @@ export async function POST(request: Request) {
     requireProtectedMutation(request);
     const user = await requireUser(request);
     ensureEmployee(user);
-    return privateJson(saveEmployeeSnapshot(user, await requestJson(request)));
+    return privateJson(saveEmployeeSnapshot(user, await requestJson(request, MAX_EMPLOYEE_REQUEST_BYTES)));
   } catch (error) {
     return privateError(error);
   }

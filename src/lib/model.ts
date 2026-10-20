@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { payPeriodDatePresets } from "./pay-period";
+import { isoDateSchema } from "./iso-date";
 
 export const safeFilenamePart = (value: string) =>
   value
@@ -10,13 +11,7 @@ export const safeFilenamePart = (value: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "driver";
 
-const dateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Choose a valid date.")
-  .refine((value) => {
-    const date = new Date(`${value}T12:00:00Z`);
-    return value >= "1900-01-01" && date.toISOString().slice(0, 10) === value;
-  }, "Choose a valid date.");
+const dateSchema = isoDateSchema.refine((value) => value >= "1900-01-01", "Choose a valid date.");
 
 const requiredText = (label: string, max: number) =>
   z

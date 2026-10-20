@@ -1,8 +1,5 @@
 import { z } from "zod";
-
-const dateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Choose a valid date.");
+import { isoDateSchema as dateSchema } from "./iso-date";
 
 const requiredText = (label: string, max: number) =>
   z

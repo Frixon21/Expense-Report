@@ -10,6 +10,7 @@ import type { Expense } from "@/lib/expense";
 import type { TripPayrollMeta } from "@/lib/demo-types";
 import type { MileageState, Profile } from "@/lib/model";
 import type { Role } from "@/lib/server/db";
+import { clientJson } from "@/lib/client-json";
 
 type AppUser = {
   id: string;
@@ -34,6 +35,8 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export default function SecureShell() {
   const [auth, setAuth] = useState<AppAuth | null>(null);
+  const [sessionError, setSessionError] = useState("");
+  const [sessionAttempt, setSessionAttempt] = useState(0);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const snapshotRef = useRef<Snapshot | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
@@ -51,28 +54,30 @@ export default function SecureShell() {
     setSnapshot(next);
   };
 
-  const refreshAuth = async () => {
-    const response = await fetch("/api/auth/me", { cache: "no-store" });
-    const next = await readJson<AppAuth>(response);
+  const refreshAuth = async (signal?: AbortSignal) => {
+    const next = await clientJson<AppAuth>("/api/auth/me", signal);
+    if (!next || typeof next.authenticated !== "boolean" || (next.authenticated && (!next.user || typeof next.user.id !== "string" || !Array.isArray(next.user.roles) || !["active", "pending", "disabled"].includes(next.user.accessStatus)))) throw new Error("The session service returned an invalid response. Please try again.");
+    if (signal?.aborted) throw new DOMException("Request cancelled.", "AbortError");
     setAuth(next);
     if (next.authenticated && next.user.accessStatus === "active" && !next.user.roles.includes("employee") && next.user.roles.some((role) => role === "payroll" || role === "super_admin")) {
       setView("payroll");
-    }
-    if (next.authenticated && next.user.accessStatus === "active" && next.user.roles.includes("employee")) {
-      if (view === "employee") await loadSnapshot();
     }
     return next;
   };
 
   const loadSnapshot = async () => {
-    const response = await fetch("/api/me", { cache: "no-store" });
-    const next = await readJson<Snapshot>(response);
+    const next = await clientJson<Snapshot>("/api/me");
     setCurrentSnapshot(next);
   };
 
   useEffect(() => {
-    void refreshAuth().catch(() => setAuth({ authenticated: false }));
-  }, []);
+    const controller = new AbortController();
+    setSessionError("");
+    void refreshAuth(controller.signal).catch((reason) => {
+      if (!controller.signal.aborted) setSessionError(reason instanceof Error ? reason.message : "Could not check your session. Please try again.");
+    });
+    return () => controller.abort();
+  }, [sessionAttempt]);
 
   useEffect(() => {
     if (!auth?.authenticated || auth.user.accessStatus !== "pending") {
@@ -112,7 +117,8 @@ export default function SecureShell() {
   const logout = async () => {
     setBusy(true); setError("");
     try {
-      await fetch("/api/auth/logout", { method: "POST" });
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      await readJson(response);
       setCurrentSnapshot(null);
       setAuth({ authenticated: false });
       setPassword(""); setBootstrapToken(""); setView("employee");
@@ -174,7 +180,10 @@ export default function SecureShell() {
     return response.blob();
   };
 
-  if (!auth) return <div className="loading-screen"><strong>Biztech Expense Report</strong><p>Checking your app session.</p></div>;
+  if (!auth) return <div className="loading-screen"><strong>Biztech Expense Report</strong>{sessionError ? <>
+    <h1>Could not check your session</h1><p role="alert">{sessionError}</p>
+    <button type="button" className="secondary" onClick={() => setSessionAttempt((value) => value + 1)}>Retry session check</button>
+  </> : <p role="status">Checking your app session.</p>}</div>;
   if (!auth.authenticated) return <main className="setup-page"><div className="setup-wrap">
     <a className="brand" href="/" aria-label="Biztech Expense Report home"><span className="brand-icon"><Route size={22} /></span><span>Biztech<small>EXPENSE REPORT</small></span></a>
     <section className="setup-card"><p className="section-kicker">BT AUTH SIGN IN</p><h1>Sign in to Expense Report</h1><p>Use your existing Biztech credentials. Expense Report creates its own session.</p>

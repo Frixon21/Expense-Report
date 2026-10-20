@@ -1,12 +1,38 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { CLIENT_REQUEST_TIMEOUT_MS } from "@/lib/client-json";
 import SecureShell from "./secure-shell";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+it("leaves the loading screen on timeout and retries without bypassing authentication", async () => {
+  vi.useFakeTimers();
+  let retry = false;
+  vi.stubGlobal("fetch", () => retry ? Promise.resolve(Response.json({ authenticated: false })) : new Promise(() => {}));
+  render(<SecureShell />);
+  expect(screen.getByRole("status")).toHaveTextContent("Checking your app session");
+  await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_REQUEST_TIMEOUT_MS); });
+  expect(screen.getByRole("heading", { name: "Could not check your session" })).toBeVisible();
+  expect(screen.getByRole("alert")).toHaveTextContent("took too long");
+  expect(screen.queryByLabelText("Password")).toBeNull();
+  retry = true;
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry session check" })); });
+  expect(screen.getByRole("heading", { name: "Sign in to Expense Report" })).toBeVisible();
+});
+
+it("shows retry for server failure or malformed session data instead of remaining in initialization", async () => {
+  vi.stubGlobal("fetch", async () => Response.json({ error: "Synthetic outage" }, { status: 503 }));
+  render(<SecureShell />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic outage");
+  vi.stubGlobal("fetch", async () => Response.json({ authenticated: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Retry session check" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("invalid response");
 });
 
 function mockPendingUser(available: boolean) {
@@ -24,6 +50,22 @@ function mockPendingUser(available: boolean) {
     throw new Error("Unexpected synthetic request: " + url);
   });
 }
+
+it("keeps the session visible when logout fails and clears it only after server confirmation", async () => {
+  let logoutFails = true;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    if (String(input) === "/api/auth/me") return Response.json({ authenticated: true, user: { id: "pending", displayName: "Synthetic", accessStatus: "pending", roles: [] } });
+    if (String(input) === "/api/auth/logout") return logoutFails ? Response.json({ error: "Synthetic logout failure" }, { status: 503 }) : Response.json({ ok: true });
+    return Response.json({ available: false });
+  });
+  render(<SecureShell />);
+  fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic logout failure");
+  expect(screen.queryByRole("heading", { name: "Sign in to Expense Report" })).toBeNull();
+  logoutFails = false;
+  fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  expect(await screen.findByRole("heading", { name: "Sign in to Expense Report" })).toBeVisible();
+});
 
 describe("pending first-admin bootstrap UI", () => {
   it("does not render a token form when server state says an active admin exists", async () => {

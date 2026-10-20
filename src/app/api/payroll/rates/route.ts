@@ -1,4 +1,4 @@
-import { createMileageRate, payrollSnapshot } from "@/lib/server/records";
+import { createMileageRate, payrollRates } from "@/lib/server/records";
 import { privateError, privateJson, requestJson, requireProtectedMutation, requireUser } from "@/lib/server/http";
 
 export const runtime = "nodejs";
@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export async function GET(request: Request) {
   try {
     const user = await requireUser(request);
-    return privateJson({ rates: payrollSnapshot(user).rates });
+    return privateJson({ rates: payrollRates(user) });
   } catch (error) {
     return privateError(error);
   }

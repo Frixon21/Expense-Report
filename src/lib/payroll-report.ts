@@ -1,3 +1,5 @@
+import { isIsoDate } from "./iso-date";
+
 export const PAYROLL_REPORT_PAGE_SIZE = 10;
 
 export type PayrollReportEmployee = {
@@ -13,12 +15,7 @@ export type PayrollReportAvailability = {
 };
 
 export function isValidPayrollReportRange(from: string, to: string) {
-  const validDate = (date: string) => {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
-    const value = new Date(date + "T12:00:00Z");
-    return Number.isFinite(value.getTime()) && value.toISOString().slice(0, 10) === date;
-  };
-  return validDate(from) && validDate(to) && from <= to;
+  return isIsoDate(from) && isIsoDate(to) && from <= to;
 }
 
 export function payrollReportName(profileName?: string | null, displayName?: string | null, username?: string | null) {

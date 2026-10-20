@@ -1,4 +1,3 @@
-import { currentUser } from "@/lib/server/auth";
 import { directOwnerExpense, ensureEmployee } from "@/lib/server/records";
 import { privateError, privateJson, requireUser } from "@/lib/server/http";
 

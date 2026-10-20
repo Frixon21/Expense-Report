@@ -30,13 +30,13 @@ The self-test uses the real application schema in a temporary database. It check
 
 Run a production build in a separate release checkout before deployment. Do not build into `.next` while the existing development server uses that directory. Do not restart or deploy without authorization. For a future HTTPS deployment, build with `npm run build`, use the configured persistent database and session secret, then start under the approved service manager. Keep the working tree's development-generated `next-env.d.ts` separate from source changes.
 
-## Local backups — activation pending
+## Existing daily local backups
 
-Proposed destination: `F:\Expense Report Backups`, outside the source repository. Proposed cadence: daily at 02:00 in the PC's local timezone. Local storage is approved in principle; the exact path, access permissions, task account, and start time still need confirmation before activation. Retention is undecided. No automatic pruning or deletion is enabled.
+Daily local backups are already configured, as confirmed by the user on October 20, 2026. The review did not change or independently inspect the existing schedule, destination, task account, permissions, or retention. Keep the current backup configuration and retained data intact; the commands below describe the backup utility, not a request to create another schedule.
 
 The command uses SQLite's online backup API, which includes WAL-backed changes consistently. Receipt payloads live in the same SQLite database; there is no separate receipt directory to copy. It checks integrity, foreign keys, schema, all application-row content, and receipt bytes against a temporary restore copy. It refuses to overwrite a backup and returns a nonzero exit code on failure.
 
-After activation is approved, the Windows Task Scheduler action can invoke the installed Node executable with these arguments and the repository as its working directory:
+The backup utility supports a daily-directory argument for an external scheduler, for example:
 
 ```powershell
 node scripts/backup-db.mjs --daily-dir "F:\Expense Report Backups"

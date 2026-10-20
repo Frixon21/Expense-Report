@@ -28,7 +28,7 @@ App sessions are bounded by both eight hours and the verified provider expiry. P
 
 ## Backups and restore checks
 
-The app provides a consistent SQLite backup command and a restore-copy check. No daily schedule or backup destination is configured here; choose the protected destination, retention, and deployment process before production, then schedule this command to run daily:
+The app provides a consistent SQLite backup command and a restore-copy check. Daily local backups are already configured outside this repository, as confirmed by the user on October 20, 2026. This review leaves that schedule, destination, and retained data unchanged. For manual backups and verification:
 
 ```powershell
 node scripts/backup-db.mjs "D:\ExpenseBackups\expense-report-YYYYMMDD.sqlite"
