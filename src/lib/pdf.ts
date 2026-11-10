@@ -9,6 +9,7 @@ import {
   formatDollars,
   formatMiles,
   totalBusinessMiles,
+  tripVehicleLabel,
   type MileageState,
   type Trip,
 } from "./model";
@@ -44,7 +45,7 @@ function wrap(value: string, font: PDFFont, width: number, size: number) {
   return lines.length ? lines : ["—"];
 }
 
-export async function createReport({
+async function createVehicleReport({
   state,
   from,
   to,
@@ -198,7 +199,16 @@ export async function createReport({
     drawText("No business trips recorded in this date range.", 36, y - 8, 9);
   for (const trip of trips) {
     const destination = wrap(trip.destination, font, 90, 7);
-    const purpose = wrap(trip.businessPurpose, font, 148, 7);
+    const purpose = wrap(
+      trip.businessPurpose +
+        (trip.vehicleName &&
+        trip.vehicleName !== state.profile.vehicleDescription
+          ? ` [Vehicle recorded: ${trip.vehicleName}]`
+          : ""),
+      font,
+      148,
+      7,
+    );
     const height = Math.max(
       26,
       Math.max(destination.length, purpose.length) * 10 + 9,
@@ -255,4 +265,49 @@ export async function createReport({
     );
   });
   return pdf.save();
+}
+
+/** Separate vehicle summaries prevent mixing odometer readings from different cars. */
+export async function createReport(input: ReportInput): Promise<Uint8Array> {
+  const { state, from, to } = input;
+  if (!state.profile || !state.vehicles?.length)
+    return createVehicleReport(input);
+  const included = state.trips.filter((t) => t.date >= from && t.date <= to);
+  const ids = [
+    ...new Set(included.map((t) => t.vehicleId ?? state.defaultVehicleId)),
+  ];
+  if (!ids.length) ids.push(state.defaultVehicleId);
+  const output = await PDFDocument.create();
+  for (const id of ids) {
+    const trips = included.filter(
+      (t) => (t.vehicleId ?? state.defaultVehicleId) === id,
+    );
+    const vehicle = state.vehicles.find((v) => v.id === id);
+    const first = trips[0];
+    const description = first
+      ? tripVehicleLabel(state, first)
+      : (vehicle?.description ?? "Legacy vehicle needs review");
+    const bytes = await createVehicleReport({
+      ...input,
+      state: {
+        ...state,
+        profile: {
+          ...state.profile,
+          vehicleDescription: description,
+          businessUseStartDate:
+            first?.vehicleBusinessUseStartDate ??
+            vehicle?.businessUseStartDate ??
+            "Unknown - review legacy profile",
+        },
+        trips,
+        annualMileage: state.annualMileage.filter(
+          (a) => (a.vehicleId ?? state.defaultVehicleId) === id,
+        ),
+      },
+    });
+    const doc = await PDFDocument.load(bytes);
+    for (const page of await output.copyPages(doc, doc.getPageIndices()))
+      output.addPage(page);
+  }
+  return output.save();
 }

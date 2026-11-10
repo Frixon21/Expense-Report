@@ -1,5 +1,5 @@
 import { HttpError } from "./records";
-import { currentUser, requestHasSameOrigin, requestUsesProtectedTransport } from "./auth";
+import { currentUser, requestHasSameOrigin, requestUsesHttpTransport } from "./auth";
 import type { AppUser } from "./db";
 
 const MAX_JSON_BYTES = 16 * 1024;
@@ -19,7 +19,7 @@ export function privateError(error: unknown) {
 }
 
 export function requireProtectedMutation(request: Request) {
-  if (!requestUsesProtectedTransport(request)) throw new HttpError(400, "Use HTTPS, or use localhost for local development.");
+  if (!requestUsesHttpTransport(request)) throw new HttpError(400, "Use the configured internal HTTP app address.");
   if (!requestHasSameOrigin(request)) throw new HttpError(403, "The request origin could not be verified.");
 }
 

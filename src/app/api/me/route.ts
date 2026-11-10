@@ -1,3 +1,5 @@
+import { after } from "next/server";
+import { dispatchNotifications } from "@/lib/server/notifications";
 import { loadEmployeeSnapshot, saveEmployeeSnapshot, ensureEmployee } from "@/lib/server/records";
 import { database } from "@/lib/server/db";
 import { MAX_EMPLOYEE_REQUEST_BYTES, privateError, privateJson, requestJson, requireProtectedMutation, requireUser } from "@/lib/server/http";
@@ -19,7 +21,10 @@ export async function POST(request: Request) {
     requireProtectedMutation(request);
     const user = await requireUser(request);
     ensureEmployee(user);
-    return privateJson(saveEmployeeSnapshot(user, await requestJson(request, MAX_EMPLOYEE_REQUEST_BYTES)));
+    const snapshot = saveEmployeeSnapshot(user, await requestJson(request, MAX_EMPLOYEE_REQUEST_BYTES));
+    // Register only after the business transaction commits; never make email failure a save failure.
+    try { after(() => dispatchNotifications().catch(() => console.warn("Notification dispatch unavailable."))); } catch { console.warn("Notification dispatch deferred."); }
+    return privateJson(snapshot);
   } catch (error) {
     return privateError(error);
   }

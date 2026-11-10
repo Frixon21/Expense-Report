@@ -1,4 +1,9 @@
 import {
+  appendReceiptPages,
+  hasReceipt,
+  type PayrollReceipt,
+} from "./receipt-pdf";
+import {
   PDFDocument,
   StandardFonts,
   rgb,
@@ -26,6 +31,7 @@ export type PayrollReportInput = {
   to: string;
   dollarsPerMile: number;
   tripRatesCentsPerMile?: Record<string, number>;
+  receipts?: Record<string, PayrollReceipt>;
 };
 
 function printable(value: string, font: PDFFont) {
@@ -73,10 +79,21 @@ function wrap(value: string, font: PDFFont, width: number, size: number) {
 
 function lineDescription(line: PayrollLine) {
   if (line.kind === "mileage") {
-    return `${line.trip.destination} — ${line.trip.businessPurpose}`;
+    return `${line.trip.destination} — ${line.trip.businessPurpose} | Vehicle: ${line.trip.vehicleName || "Legacy vehicle needs review"}`;
   }
   const expense = line.expense;
   return `${expense.merchant} — ${categoryLabel(expense.category)} — ${expense.businessPurpose}`;
+}
+
+function mileageReimbursementCents(
+  trip: PayrollLine & { kind: "mileage" },
+  dollarsPerMile: number,
+  rates: Record<string, number>,
+) {
+  const rate = rates[trip.trip.id];
+  return rate === undefined
+    ? Math.round(tripReimbursement(trip.trip, dollarsPerMile) * 100)
+    : Math.round(((trip.trip.end_tenths - trip.trip.start_tenths) * rate) / 10);
 }
 
 function lineAmount(
@@ -86,13 +103,14 @@ function lineAmount(
 ): { primary: string; parkingTolls: string } {
   if (line.kind === "mileage") {
     const trip = line.trip;
-    const rate = tripRatesCentsPerMile[trip.id];
-    const mileagePay = rate === undefined
-      ? tripReimbursement(trip, dollarsPerMile)
-      : ((trip.end_tenths - trip.start_tenths) / 10) * (rate / 100);
+    const mileagePayCents = mileageReimbursementCents(
+      line,
+      dollarsPerMile,
+      tripRatesCentsPerMile,
+    );
     const parkingTolls = trip.parking_cents + trip.tolls_cents;
     return {
-      primary: formatDollars(Math.round(mileagePay * 100)),
+      primary: formatDollars(mileagePayCents),
       parkingTolls: parkingTolls ? formatDollars(parkingTolls) : "—",
     };
   }
@@ -121,6 +139,7 @@ export async function createPayrollEmployeeReport({
   to,
   dollarsPerMile,
   tripRatesCentsPerMile = {},
+  receipts,
 }: PayrollReportInput): Promise<Uint8Array> {
   if (from > to)
     throw new Error("The report end date must follow its start date.");
@@ -142,14 +161,19 @@ export async function createPayrollEmployeeReport({
     .filter((line) => line.kind === "expense")
     .map((line) => line.expense);
 
+  const receiptEntries = visibleExpenses
+    .filter((expense) => hasReceipt(expense) || Boolean(receipts?.[expense.id]))
+    .map((expense, index) => ({ expense, reference: `R${index + 1}` }));
+  const receiptReferences = new Map(
+    receiptEntries.map((entry) => [entry.expense.id, entry.reference]),
+  );
   const miles = totalBusinessMiles(visibleTrips);
-  const mileagePay = visibleTrips.reduce(
-    (sum, trip) => {
-      const rate = tripRatesCentsPerMile[trip.id];
-      return sum + (rate === undefined
-        ? tripReimbursement(trip, dollarsPerMile)
-        : ((trip.end_tenths - trip.start_tenths) / 10) * (rate / 100));
-    },
+  const mileagePayCents = lines.reduce(
+    (sum, line) =>
+      line.kind === "mileage"
+        ? sum +
+          mileageReimbursementCents(line, dollarsPerMile, tripRatesCentsPerMile)
+        : sum,
     0,
   );
   const parkingTolls = visibleTrips.reduce(
@@ -250,7 +274,7 @@ export async function createPayrollEmployeeReport({
   drawText("Payroll reimbursement summary", 30, y, 20, true);
   y -= 26;
   drawText(
-    `${profile.driverName}  |  ${profile.vehicleDescription}`,
+    `${profile.driverName}  |  Vehicle listed with each mileage entry`,
     30,
     y,
     10,
@@ -268,7 +292,7 @@ export async function createPayrollEmployeeReport({
   );
   y -= 18;
   drawText(
-    `Business miles: ${formatMiles(miles)}   Est. mileage pay: ${formatDollars(Math.round(mileagePay * 100))}`,
+    `Business miles: ${formatMiles(miles)}   Est. mileage pay: ${formatDollars(mileagePayCents)}`,
     30,
     y,
     9,
@@ -282,6 +306,14 @@ export async function createPayrollEmployeeReport({
     9,
     true,
   );
+  y -= 15;
+  drawText(
+    `Total: ${formatDollars(mileagePayCents + parkingTolls + expenseReimburse)}`,
+    30,
+    y,
+    10,
+    true,
+  );
   y -= 20;
   tableHeader();
 
@@ -290,7 +322,16 @@ export async function createPayrollEmployeeReport({
   }
 
   for (const line of lines) {
-    const description = wrap(lineDescription(line), font, COL.descWidth, 7);
+    const reference =
+      line.kind === "expense"
+        ? receiptReferences.get(line.expense.id)
+        : undefined;
+    const description = wrap(
+      lineDescription(line) + (reference ? ` [Receipt ${reference}]` : ""),
+      font,
+      COL.descWidth,
+      7,
+    );
     const amounts = lineAmount(line, dollarsPerMile, tripRatesCentsPerMile);
     const status = wrap(lineStatus(employee, line), font, 78, 7);
     const extras = wrap(amounts.parkingTolls, font, 72, 7);
@@ -355,6 +396,19 @@ export async function createPayrollEmployeeReport({
       color: rule,
     });
   }
+
+  await appendReceiptPages({
+    pdf,
+    font,
+    bold,
+    employeeName: profile.driverName,
+    from,
+    to,
+    entries: receiptEntries,
+    receipts,
+    printable,
+    wrap,
+  });
 
   const pages = pdf.getPages();
   pages.forEach((current, index) => {

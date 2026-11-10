@@ -1,3 +1,4 @@
+import { initializeVehicleSchema } from "./vehicle-store.ts";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -150,6 +151,11 @@ function createDatabase(path: string) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS record_history_owner_idx ON record_history(owner_id, created_at);
+    CREATE TABLE IF NOT EXISTS notification_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), settings_json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','review')),
+      attempts INTEGER NOT NULL DEFAULT 0, first_at INTEGER, next_at INTEGER NOT NULL, lease TEXT, provider_id TEXT, error_code TEXT
+    );
     CREATE TABLE IF NOT EXISTS audit_events (
       id TEXT PRIMARY KEY,
       actor_id TEXT NOT NULL REFERENCES users(id),
@@ -161,10 +167,23 @@ function createDatabase(path: string) {
     CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at);
   `);
   // Additive migration: older sessions have no provider proof and must sign in again.
-  const sessionColumns = new Set(db.prepare("PRAGMA table_info(sessions)").all().map((row) => String(row.name)));
-  for (const [name, type] of Object.entries({ provider_expires_at: "INTEGER", provider_key_id: "TEXT", provider_key_thumbprint: "TEXT", provider_issuer: "TEXT", provider_subject: "TEXT" })) {
-    if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  const sessionColumns = new Set(
+    db
+      .prepare("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => String(row.name)),
+  );
+  for (const [name, type] of Object.entries({
+    provider_expires_at: "INTEGER",
+    provider_key_id: "TEXT",
+    provider_key_thumbprint: "TEXT",
+    provider_issuer: "TEXT",
+    provider_subject: "TEXT",
+  })) {
+    if (!sessionColumns.has(name))
+      db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
+  initializeVehicleSchema(db);
   return db;
 }
 
@@ -173,7 +192,9 @@ export function database() {
     return globalDb.__expenseReportTestDb;
   }
   if (!globalDb.__expenseReportDb) {
-    const path = process.env.EXPENSE_REPORT_DB_PATH ?? resolve(process.cwd(), ".data", "expense-report.sqlite");
+    const path =
+      process.env.EXPENSE_REPORT_DB_PATH ??
+      resolve(process.cwd(), ".data", "expense-report.sqlite");
     globalDb.__expenseReportDb = createDatabase(path);
   }
   return globalDb.__expenseReportDb;
@@ -188,7 +209,9 @@ export function setTestDatabase(db: DatabaseSync | null) {
 
 export function createTestDatabase() {
   if (process.env.NODE_ENV !== "test") {
-    throw new Error("An in-memory test database can only be created in test mode.");
+    throw new Error(
+      "An in-memory test database can only be created in test mode.",
+    );
   }
   return createDatabase(":memory:");
 }
@@ -206,7 +229,11 @@ export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
 }
 
 export function getUser(db: DatabaseSync, id: string): AppUser | null {
-  const row = db.prepare(`SELECT id, issuer, subject, display_name, email, access_status FROM users WHERE id = ?`).get(id) as
+  const row = db
+    .prepare(
+      `SELECT id, issuer, subject, display_name, email, access_status FROM users WHERE id = ?`,
+    )
+    .get(id) as
     | {
         id: string;
         issuer: string;
@@ -217,7 +244,9 @@ export function getUser(db: DatabaseSync, id: string): AppUser | null {
       }
     | undefined;
   if (!row) return null;
-  const roles = db.prepare("SELECT role FROM roles WHERE user_id = ? ORDER BY role").all(id) as { role: Role }[];
+  const roles = db
+    .prepare("SELECT role FROM roles WHERE user_id = ? ORDER BY role")
+    .all(id) as { role: Role }[];
   return {
     id: row.id,
     issuer: row.issuer,
@@ -230,7 +259,10 @@ export function getUser(db: DatabaseSync, id: string): AppUser | null {
 }
 
 export function hasRole(user: AppUser, role: Role) {
-  return user.roles.includes(role) || (role === "payroll" && user.roles.includes("super_admin"));
+  return (
+    user.roles.includes(role) ||
+    (role === "payroll" && user.roles.includes("super_admin"))
+  );
 }
 
 export function recordAudit(
@@ -240,9 +272,17 @@ export function recordAudit(
   subjectUserId?: string,
   details?: unknown,
 ) {
-  db.prepare(`INSERT INTO audit_events (id, actor_id, event_type, subject_user_id, details_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(crypto.randomUUID(), actorId, eventType, subjectUserId ?? null, details ? JSON.stringify(details) : null, new Date().toISOString());
+  db.prepare(
+    `INSERT INTO audit_events (id, actor_id, event_type, subject_user_id, details_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    crypto.randomUUID(),
+    actorId,
+    eventType,
+    subjectUserId ?? null,
+    details ? JSON.stringify(details) : null,
+    new Date().toISOString(),
+  );
 }
 
 export function recordHistory(
@@ -259,20 +299,21 @@ export function recordHistory(
     details?: unknown;
   },
 ) {
-  db.prepare(`INSERT INTO record_history
+  db.prepare(
+    `INSERT INTO record_history
     (id, record_type, record_id, owner_id, actor_id, action, from_status, to_status, reason, details_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(
-      crypto.randomUUID(),
-      input.recordType,
-      input.recordId,
-      input.ownerId,
-      input.actorId,
-      input.action,
-      input.fromStatus ?? null,
-      input.toStatus ?? null,
-      input.reason ?? null,
-      input.details ? JSON.stringify(input.details) : null,
-      new Date().toISOString(),
-    );
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    crypto.randomUUID(),
+    input.recordType,
+    input.recordId,
+    input.ownerId,
+    input.actorId,
+    input.action,
+    input.fromStatus ?? null,
+    input.toStatus ?? null,
+    input.reason ?? null,
+    input.details ? JSON.stringify(input.details) : null,
+    new Date().toISOString(),
+  );
 }

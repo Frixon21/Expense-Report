@@ -93,7 +93,7 @@ describe("server-side identity and ownership", () => {
     }));
     expect(firstBootstrap.status).toBe(200);
     const active = await authMe(request("/api/auth/me", cookie!));
-    expect((await active.json()).user.roles).toEqual(["employee", "payroll", "super_admin"]);
+    expect((await active.json()).user.roles).toEqual(["employee", "super_admin"]);
     const noLongerEligible = await bootstrapAvailability(request("/api/admin/bootstrap/availability", cookie!));
     expect(await noLongerEligible.json()).toEqual({ available: false });
 
@@ -302,35 +302,28 @@ describe("server-side identity and ownership", () => {
     expect(db.prepare("SELECT action, reason FROM record_history WHERE record_id = ? ORDER BY created_at DESC LIMIT 1").get(bobExpenseId)).toEqual({ action: "admin_repair", reason: "Synthetic optional-field correction" });
   });
 
-  it("requires explicit office HTTP opt-in and rejects HTTP in production", async () => {
+  it("rejects unsupported BT Auth endpoint schemes in production", async () => {
     const previousBase = process.env.BT_AUTH_BASE_URL;
-    const previousAllowHttp = process.env.BT_AUTH_ALLOW_HTTP;
     const previousNodeEnv = process.env.NODE_ENV;
-    process.env.BT_AUTH_BASE_URL = "http://synthetic-auth.example.test";
-    Reflect.set(process.env, "NODE_ENV", "test");
-    delete process.env.BT_AUTH_ALLOW_HTTP;
+    Reflect.set(process.env, "NODE_ENV", "production");
     try {
-      await expect(authenticateWithBtAuth("synthetic-user", syntheticPassword))
-        .rejects.toMatchObject({ code: "BT_AUTH_CONFIGURATION_INVALID" });
-      process.env.BT_AUTH_ALLOW_HTTP = "true";
-      Reflect.set(process.env, "NODE_ENV", "production");
-      await expect(authenticateWithBtAuth("synthetic-user", syntheticPassword))
-        .rejects.toMatchObject({ code: "BT_AUTH_CONFIGURATION_INVALID" });
+      for (const base of ["ftp://synthetic-auth.example.test", "file:///synthetic-auth", "data:text/plain,synthetic"]) {
+        process.env.BT_AUTH_BASE_URL = base;
+        await expect(authenticateWithBtAuth("synthetic-user", syntheticPassword))
+          .rejects.toMatchObject({ code: "BT_AUTH_CONFIGURATION_INVALID" });
+      }
     } finally {
       if (previousBase === undefined) delete process.env.BT_AUTH_BASE_URL;
       else process.env.BT_AUTH_BASE_URL = previousBase;
-      if (previousAllowHttp === undefined) delete process.env.BT_AUTH_ALLOW_HTTP;
-      else process.env.BT_AUTH_ALLOW_HTTP = previousAllowHttp;
       if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
       else Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
     }
   });
 
   it("preserves BT Auth disabled, locked, and rate-limited login responses", async () => {
-    const names = ["BT_AUTH_BASE_URL", "BT_AUTH_ALLOW_HTTP", "APP_PUBLIC_ORIGIN", "NODE_ENV"];
+    const names = ["BT_AUTH_BASE_URL", "APP_PUBLIC_ORIGIN", "NODE_ENV"];
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     process.env.BT_AUTH_BASE_URL = "http://synthetic-auth.example.test";
-    process.env.BT_AUTH_ALLOW_HTTP = "true";
     process.env.APP_PUBLIC_ORIGIN = "http://localhost";
     Reflect.set(process.env, "NODE_ENV", "test");
     const cases = [
@@ -371,7 +364,7 @@ describe("server-side identity and ownership", () => {
   });
 
   it("returns safe diagnostic codes for the post-login adapter stages", async () => {
-    const names = ["BT_AUTH_BASE_URL", "BT_AUTH_JWKS_URL", "BT_AUTH_ISSUER", "BT_AUTH_ALLOW_HTTP", "APP_PUBLIC_ORIGIN", "NODE_ENV"];
+    const names = ["BT_AUTH_BASE_URL", "BT_AUTH_JWKS_URL", "BT_AUTH_ISSUER", "APP_PUBLIC_ORIGIN", "NODE_ENV"];
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     const base = "http://synthetic-auth.example.test";
     const jwksUrl = `${base}/.well-known/jwks.json`;
@@ -379,7 +372,6 @@ describe("server-side identity and ownership", () => {
     process.env.BT_AUTH_BASE_URL = base;
     process.env.BT_AUTH_JWKS_URL = jwksUrl;
     process.env.BT_AUTH_ISSUER = "https://synthetic-issuer.example.test";
-    process.env.BT_AUTH_ALLOW_HTTP = "true";
     process.env.APP_PUBLIC_ORIGIN = "http://localhost";
     Reflect.set(process.env, "NODE_ENV", "test");
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -430,7 +422,7 @@ describe("server-side identity and ownership", () => {
   });
 
   it("verifies aud-less RS256 cookies and rejects invalid BT Auth claims", async () => {
-    const names = ["BT_AUTH_BASE_URL", "BT_AUTH_JWKS_URL", "BT_AUTH_ISSUER", "BT_AUTH_AUDIENCE", "BT_AUTH_COOKIE_NAME", "BT_AUTH_USERNAME_FIELD", "BT_AUTH_PASSWORD_FIELD", "BT_AUTH_ALLOW_HTTP"];
+    const names = ["BT_AUTH_BASE_URL", "BT_AUTH_JWKS_URL", "BT_AUTH_ISSUER", "BT_AUTH_AUDIENCE", "BT_AUTH_COOKIE_NAME", "BT_AUTH_USERNAME_FIELD", "BT_AUTH_PASSWORD_FIELD"];
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     const base = "http://synthetic-auth.example.test";
     const issuer = "https://synthetic-issuer.example.test";
@@ -493,7 +485,6 @@ describe("server-side identity and ownership", () => {
     process.env.BT_AUTH_BASE_URL = base;
     process.env.BT_AUTH_JWKS_URL = jwksUrl;
     process.env.BT_AUTH_ISSUER = issuer;
-    process.env.BT_AUTH_ALLOW_HTTP = "true";
     delete process.env.BT_AUTH_AUDIENCE;
     delete process.env.BT_AUTH_USERNAME_FIELD;
     delete process.env.BT_AUTH_PASSWORD_FIELD;

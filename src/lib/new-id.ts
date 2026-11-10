@@ -1,15 +1,29 @@
-/** UUID v4 for records. Works on http:// LAN hosts where randomUUID is blocked. */
+/** Cryptographically random UUID v4, including HTTP LAN origins without randomUUID. */
 export function newId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+  const source = globalThis.crypto;
+  if (typeof source?.randomUUID === "function") {
     try {
-      return crypto.randomUUID();
+      return source.randomUUID();
     } catch {
-      // Non-secure context (e.g. http://192.168.x.x) throws in some browsers.
+      // Older browsers may expose randomUUID but reject it for this origin.
     }
   }
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
-    const random = Math.trunc(Math.random() * 16);
-    if (char === "x") return random.toString(16);
-    return ((random & 0x3) | 0x8).toString(16);
-  });
+  if (typeof source?.getRandomValues !== "function") {
+    throw new Error(
+      "This browser cannot generate a secure identifier. Use a supported browser and try again.",
+    );
+  }
+  const bytes = source.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
 }

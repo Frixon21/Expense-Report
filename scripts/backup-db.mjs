@@ -52,7 +52,7 @@ function inspectApplicationDatabase(path) {
       throw new Error(`Database is missing Expense Report tables: ${missing.join(", ")}.`);
     }
     return Object.fromEntries(
-      applicationTables.map((table) => [
+      [...applicationTables, ...["notification_settings", "notification_outbox", "vehicles", "vehicle_preferences", "vehicle_annual_mileage"].filter((name) => names.has(name))].map((table) => [
         table,
         Number(db.prepare(`SELECT COUNT(*) AS count FROM "${table}"`).get().count),
       ]),
@@ -70,7 +70,7 @@ function contentFingerprint(path) {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
     const hash = createHash("sha256");
-    for (const table of applicationTables) {
+    for (const table of [...applicationTables, ...["notification_settings", "notification_outbox", "vehicles", "vehicle_preferences", "vehicle_annual_mileage"].filter((name) => db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name))]) {
       hash.update(table);
       for (const row of db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).iterate()) hash.update(JSON.stringify(row));
     }
@@ -169,6 +169,12 @@ async function runSyntheticSelfTest() {
     source.prepare("INSERT INTO mileage_rates(id,effective_from,cents_per_mile,created_by,created_at) VALUES ('rate','2026-01-01',70,'synthetic',?)").run(now);
     source.prepare("INSERT INTO record_history(id,record_type,record_id,owner_id,actor_id,action,details_json,created_at) VALUES ('history','expense',?,'synthetic','synthetic','created','{}',?)").run(payloads[0].id, now);
     source.prepare("INSERT INTO audit_events(id,actor_id,event_type,subject_user_id,details_json,created_at) VALUES ('audit','synthetic','synthetic_test','synthetic','{}',?)").run(now);
+    source.prepare("INSERT INTO notification_settings VALUES (1,?)").run(JSON.stringify({enabled:false,from:"synthetic@example.test",reviewUrl:"http://localhost/"}));
+    source.prepare("INSERT INTO notification_outbox(id,payload_json,status,next_at,provider_id) VALUES ('synthetic-event','{}','sent',0,'synthetic-provider-id')").run();
+    const {ensureVehicleData}=await import("../src/lib/server/vehicle-store.ts");
+    ensureVehicleData(source,"synthetic");
+    const migrated=source.prepare("SELECT vehicle_id,vehicle_name FROM trips WHERE user_id='synthetic'").get();
+    if(!migrated.vehicle_id||migrated.vehicle_name!=="Synthetic vehicle")throw new Error("Synthetic vehicle migration failed.");
     await backup(source, backupPath);
     source.close();
     source = undefined;
@@ -178,6 +184,7 @@ async function runSyntheticSelfTest() {
     if (JSON.stringify(backupCounts) !== JSON.stringify(restoredCounts) || backupCounts.users !== 1 || backupCounts.expenses !== 2 || backupCounts.trips !== 1) {
       throw new Error("Synthetic rows did not survive the backup restore check.");
     }
+    if(backupCounts.vehicles!==1||backupCounts.vehicle_preferences!==1||backupCounts.vehicle_annual_mileage!==1)throw new Error("Synthetic vehicle records missing from backup.");
     verifyRestoreCopy(backupPath);
     const receiptRows = new DatabaseSync(restoredPath, { readOnly: true });
     try {

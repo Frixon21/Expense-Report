@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Download, X } from "lucide-react";
 
 export type ReceiptAttachment = {
@@ -39,6 +39,17 @@ export function ReceiptViewButton({
       title={label}
       onClick={() => onOpen(receipt)}
     >
+      {receipt.receiptMimeType?.startsWith("image/") && (
+        <img
+          loading="lazy"
+          className="receipt-thumbnail"
+          src={receipt.receiptDataUrl}
+          alt="Receipt thumbnail"
+          onError={(e) => {
+            e.currentTarget.hidden = true;
+          }}
+        />
+      )}
       {label}
     </button>
   );
@@ -51,6 +62,12 @@ export function ReceiptViewerModal({
   receipt: ReceiptAttachment | null;
   onClose: () => void;
 }) {
+  const [rotation, setRotation] = useState(0);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setRotation(0);
+    setFailed(false);
+  }, [receipt]);
   useEffect(() => {
     if (!receipt) return;
     const onKey = (event: KeyboardEvent) => {
@@ -66,6 +83,9 @@ export function ReceiptViewerModal({
     receipt.receiptMimeType === "application/pdf" ||
     receipt.receiptFileName.toLowerCase().endsWith(".pdf");
 
+  const canOpenInNewTab = /^\/api\/expenses\/[^/?#]+\/receipt$/.test(
+    receipt.receiptDataUrl,
+  );
   return (
     <div
       className="modal-backdrop receipt-viewer-backdrop"
@@ -82,6 +102,28 @@ export function ReceiptViewerModal({
         <header className="receipt-viewer-header">
           <h2 id="receipt-viewer-title">{receipt.receiptFileName}</h2>
           <div className="receipt-viewer-actions">
+            {canOpenInNewTab && (
+              <a
+                className="secondary"
+                href={receipt.receiptDataUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open in new tab
+              </a>
+            )}
+            {!(
+              receipt.receiptMimeType === "application/pdf" ||
+              receipt.receiptFileName.toLowerCase().endsWith(".pdf")
+            ) && (
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setRotation((value) => (value + 90) % 360)}
+              >
+                Rotate view
+              </button>
+            )}
             <button
               type="button"
               className="secondary"
@@ -101,6 +143,21 @@ export function ReceiptViewerModal({
           </div>
         </header>
         <div className="receipt-viewer-body">
+          {failed && (
+            <p className="error" role="alert">
+              Receipt preview could not be read. Download the original or attach
+              a readable replacement. PDF preview availability depends on your
+              browser.
+            </p>
+          )}
+          {isPdf && (
+            <p className="receipt-preview-note">
+              If the PDF preview is unavailable,{" "}
+              {canOpenInNewTab
+                ? "open it in a new tab or download the original."
+                : "download the original."}
+            </p>
+          )}
           {isPdf ? (
             <iframe
               title={receipt.receiptFileName}
@@ -111,6 +168,11 @@ export function ReceiptViewerModal({
             <img
               src={receipt.receiptDataUrl}
               alt={receipt.receiptFileName}
+              style={{
+                transform: `rotate(${rotation}deg)`,
+                maxHeight: rotation % 180 ? "55vh" : "75vh",
+              }}
+              onError={() => setFailed(true)}
               className="receipt-viewer-image"
             />
           )}

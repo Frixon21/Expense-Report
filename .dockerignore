@@ -1,0 +1,24 @@
+# Only application build inputs enter the context. No host data or environment.
+**
+!package.json
+!package-lock.json
+!next.config.ts
+!tsconfig.json
+!next-env.d.ts
+!src/
+!src/**
+!public/
+!public/**
+!scripts/
+!scripts/backup-db.mjs
+!Dockerfile
+!.dockerignore
+**/*.test.*
+**/.env*
+**/*.sqlite*
+**/*.db
+**/*.db-*
+**/*.pem
+**/*.key
+**/*.pfx
+**/*.p12

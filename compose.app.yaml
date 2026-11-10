@@ -1,0 +1,25 @@
+# App-only template. No BTAuth service or shared-network integration is assumed.
+# Binding stays localhost-only until the deployment host and access plan are set.
+services:
+  expense-report:
+    image: expense-report:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${EXPENSE_REPORT_HOST_PORT:-3000}:3000"
+    environment:
+      APP_PUBLIC_ORIGIN: ${APP_PUBLIC_ORIGIN:?Set the employee-facing HTTP origin}
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?Supply the persistent session secret at runtime}
+      BT_AUTH_BASE_URL: ${BT_AUTH_BASE_URL:?Set the reachable HTTP BTAuth origin}
+      BT_AUTH_JWKS_URL: ${BT_AUTH_JWKS_URL:?Set the full HTTP JWKS URL}
+      BT_AUTH_ISSUER: ${BT_AUTH_ISSUER:?Use the unchanged BTAuth SERVICE_ISSUER}
+      FIRST_ADMIN_BOOTSTRAP_TOKEN: ${FIRST_ADMIN_BOOTSTRAP_TOKEN:-}
+      EXPENSE_REPORT_DB_PATH: /data/expense-report.sqlite
+    volumes:
+      - expense-data:/data
+
+volumes:
+  expense-data:

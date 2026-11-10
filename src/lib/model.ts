@@ -11,7 +11,10 @@ export const safeFilenamePart = (value: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "driver";
 
-const dateSchema = isoDateSchema.refine((value) => value >= "1900-01-01", "Choose a valid date.");
+const dateSchema = isoDateSchema.refine(
+  (value) => value >= "1900-01-01",
+  "Choose a valid date.",
+);
 
 const requiredText = (label: string, max: number) =>
   z
@@ -61,11 +64,20 @@ export const profileSchema = z.object({
   businessUseStartDate: dateSchema,
 });
 
+export const vehicleRecordSchema = z.object({
+  id: z.string().uuid(),
+  description: requiredText("Vehicle description", 150),
+  businessUseStartDate: dateSchema.or(z.literal("")),
+  retired: z.boolean(),
+});
+export type Vehicle = z.infer<typeof vehicleRecordSchema>;
+
 export const tripInputSchema = z
   .object({
     date: dateSchema,
     destination: requiredText("Destination or area", 200),
     businessPurpose: requiredText("Business purpose", 500),
+    vehicleId: z.string().uuid().optional(),
     start: odometerInput,
     end: odometerInput,
     parking: moneyInput,
@@ -79,6 +91,7 @@ export const tripInputSchema = z
     date: value.date,
     destination: value.destination,
     businessPurpose: value.businessPurpose,
+    vehicleId: value.vehicleId,
     start_tenths: value.start,
     end_tenths: value.end,
     parking_cents: value.parking,
@@ -88,6 +101,7 @@ export const tripInputSchema = z
 export const annualMileageInputSchema = z
   .object({
     year: z.number().int().min(1900).max(9999),
+    vehicleId: z.string().uuid().optional(),
     opening: optionalOdometerInput,
     closing: optionalOdometerInput,
   })
@@ -104,6 +118,7 @@ export const annualMileageInputSchema = z
   )
   .transform((value) => ({
     year: value.year,
+    vehicleId: value.vehicleId,
     opening_tenths: value.opening,
     closing_tenths: value.closing,
   }));
@@ -112,6 +127,7 @@ export const profileRecordSchema = profileSchema;
 export const annualMileageRecordSchema = z
   .object({
     year: z.number().int().min(1900).max(9999),
+    vehicleId: z.string().uuid().optional(),
     opening_tenths: z.number().int().nonnegative().nullable(),
     closing_tenths: z.number().int().nonnegative().nullable(),
   })
@@ -133,6 +149,9 @@ export const tripRecordSchema = z
     end_tenths: z.number().int().nonnegative(),
     parking_cents: z.number().int().nonnegative(),
     tolls_cents: z.number().int().nonnegative(),
+    vehicleId: z.string().uuid().optional(),
+    vehicleName: z.string().max(150).optional(),
+    vehicleBusinessUseStartDate: z.string().optional(),
     createdAt: z.string().datetime(),
   })
   .refine(
@@ -145,6 +164,9 @@ export const mileageStateSchema = z.object({
   profile: profileRecordSchema.nullable(),
   annualMileage: z.array(annualMileageRecordSchema),
   trips: z.array(tripRecordSchema),
+  vehicles: z.array(vehicleRecordSchema).optional(),
+  defaultVehicleId: z.string().uuid().optional(),
+  vehicleMigrationWarning: z.string().optional(),
 });
 
 export type Profile = z.infer<typeof profileRecordSchema>;
@@ -173,15 +195,26 @@ export const annualMileageComplete = (
   state: MileageState,
   year: number,
 ): boolean => {
-  const record = state.annualMileage.find((item) => item.year === year);
-  return (
-    record !== undefined &&
-    record.opening_tenths !== null &&
-    record.closing_tenths !== null
+  const used = new Set(
+    state.trips
+      .filter((t) => t.date.startsWith(String(year) + "-"))
+      .map((t) => t.vehicleId ?? state.defaultVehicleId),
+  );
+  if (!used.size) used.add(state.defaultVehicleId);
+  return [...used].every((vehicleId) =>
+    state.annualMileage.some(
+      (item) =>
+        item.year === year &&
+        (item.vehicleId ?? state.defaultVehicleId) === vehicleId &&
+        item.opening_tenths !== null &&
+        item.closing_tenths !== null,
+    ),
   );
 };
 
-export const lastTripEndTenths = (trips: ReadonlyArray<Trip>): number | null => {
+export const lastTripEndTenths = (
+  trips: ReadonlyArray<Trip>,
+): number | null => {
   if (!trips.length) return null;
   const latest = [...trips].sort((a, b) => {
     const byDate = b.date.localeCompare(a.date);
@@ -220,3 +253,52 @@ export const dateRangePresets = (reference = new Date()): DateRangePreset[] => {
     ...payPeriodDatePresets(reference),
   ];
 };
+
+/** Backward-compatible browser/demo state. Production IDs are assigned by the server migration. */
+export function withLegacyVehicle(
+  state: MileageState,
+  initialId: string,
+): MileageState {
+  if (state.vehicles !== undefined || !state.profile) return state;
+  if (!state.profile.vehicleDescription.trim())
+    return {
+      ...state,
+      vehicles: [],
+      vehicleMigrationWarning:
+        "Existing vehicle profile is missing. Confirm the known car in Settings; trips have been retained.",
+    };
+  const vehicle: Vehicle = {
+    id: initialId,
+    description: state.profile.vehicleDescription,
+    businessUseStartDate: state.profile.businessUseStartDate,
+    retired: false,
+  };
+  return {
+    ...state,
+    vehicles: [vehicle],
+    defaultVehicleId: initialId,
+    trips: state.trips.map((t) =>
+      t.vehicleId
+        ? t
+        : {
+            ...t,
+            vehicleId: initialId,
+            vehicleName: t.vehicleName ?? vehicle.description,
+            vehicleBusinessUseStartDate:
+              t.vehicleBusinessUseStartDate ?? vehicle.businessUseStartDate,
+          },
+    ),
+    annualMileage: state.annualMileage.map((a) => ({
+      ...a,
+      vehicleId: a.vehicleId ?? initialId,
+    })),
+  };
+}
+export function tripVehicleLabel(state: MileageState, trip: Trip) {
+  return (
+    trip.vehicleName ??
+    state.vehicles?.find((v) => v.id === trip.vehicleId)?.description ??
+    (!trip.vehicleId ? state.profile?.vehicleDescription : undefined) ??
+    "Legacy vehicle needs review"
+  );
+}

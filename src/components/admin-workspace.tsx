@@ -1,13 +1,14 @@
 "use client";
+import { NotificationSettings } from "./notification-settings";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { isAdministrativeAuditEvent, presentAuditEvent, type AuditEvent } from "@/lib/audit-presentation";
 import type { Role } from "@/lib/server/db";
 
 type AdminData = {
   requests: Array<{ request_id: string; requested_at: string; user_id: string; display_name: string; email: string | null }>;
   users: Array<{ id: string; displayName: string; email: string | null; accessStatus: string; roles: Role[] }>;
 };
-type AuditEvent = { id: string; eventType: string; subjectUserId: string | null; subjectName: string | null; subjectEmail: string | null; details: unknown; createdAt: string; actorName: string; actorEmail: string | null };
 type AuditPage = { events: AuditEvent[]; page: number; pageSize: number; total: number; totalPages: number };
 type AuditFilters = { query: string; from: string; to: string; event: string; actor: string; account: string };
 const emptyAuditFilters: AuditFilters = { query: "", from: "", to: "", event: "", actor: "", account: "" };
@@ -18,7 +19,7 @@ async function getJson<T>(response: Response) {
   return payload as T;
 }
 
-export default function AdminWorkspace() {
+export default function AdminWorkspace({ canViewPayroll = false }: { canViewPayroll?: boolean }) {
   const [data, setData] = useState<AdminData | null>(null);
   const [error, setError] = useState("");
   const [audit, setAudit] = useState<AuditPage | null>(null);
@@ -29,16 +30,17 @@ export default function AdminWorkspace() {
   const [grant, setGrant] = useState<Record<string, { payroll: boolean; admin: boolean }>>({});
   const [roleSelections, setRoleSelections] = useState<Record<string, Role[]>>({});
   const [busy, setBusy] = useState("");
+  const roleSavePending = useRef(false);
 
   const loadAudit = async (filters: AuditFilters, page: number) => {
     setAuditBusy(true);
     try {
       const params = new URLSearchParams({ page: String(page) });
       for (const [key, value] of Object.entries(filters)) {
-        if (value.trim()) params.set(key === "query" ? "q" : key, value.trim());
+        if ((key !== "query" || canViewPayroll) && value.trim()) params.set(key === "query" ? "q" : key, value.trim());
       }
       const next = await fetch(`/api/admin/audit?${params.toString()}`, { cache: "no-store" }).then((response) => getJson<AuditPage>(response));
-      setAudit(next);
+      setAudit({ ...next, events: next.events.map(event => presentAuditEvent(event, canViewPayroll)) });
       setAuditPage(next.page);
     } finally {
       setAuditBusy(false);
@@ -56,7 +58,7 @@ export default function AdminWorkspace() {
 
   useEffect(() => {
     void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load access management."));
-  }, []);
+  }, [canViewPayroll]);
 
   const review = async (requestId: string, decision: "approve" | "deny") => {
     setBusy(requestId); setError("");
@@ -73,16 +75,26 @@ export default function AdminWorkspace() {
   };
 
   const saveRoles = async (id: string) => {
+    if (roleSavePending.current || busy) return;
+    roleSavePending.current = true;
     setBusy(id); setError("");
+    let reloading = false;
     try {
-      const response = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+      const roles = roleSelections[id] ?? data?.users.find(account => account.id === id)?.roles;
+      if (!roles) throw new Error("This account is no longer available. Reload and try again.");
+      const response = await fetch("/api/admin/users/" + encodeURIComponent(id), {
         method: "PATCH", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ roles: roleSelections[id] ?? [] }),
+        body: JSON.stringify({ roles }),
       });
-      await getJson(response); await refresh();
+      await getJson(response);
+      // A full reload rechecks the authenticated account's current server-backed roles.
+      window.location.reload();
+      reloading = true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update roles.");
-    } finally { setBusy(""); }
+    } finally {
+      if (!reloading) { roleSavePending.current = false; setBusy(""); }
+    }
   };
 
   const toggleStatus = async (id: string, accessStatus: "active" | "disabled") => {
@@ -161,7 +173,7 @@ export default function AdminWorkspace() {
             </label>)}
           </div>
           <div className="admin-user-actions">
-            <button type="button" className="secondary" disabled={busy === account.id} onClick={() => void saveRoles(account.id)}>Save roles</button>
+            <button type="button" className="secondary" disabled={Boolean(busy)} onClick={() => void saveRoles(account.id)}>Save roles</button>
             {account.accessStatus === "active"
               ? <button type="button" className="danger-button" disabled={busy === account.id} onClick={() => void toggleStatus(account.id, "disabled")}>Disable</button>
               : <button type="button" className="secondary" disabled={busy === account.id} onClick={() => void toggleStatus(account.id, "active")}>Enable</button>}
@@ -171,22 +183,24 @@ export default function AdminWorkspace() {
       {!data.users.length && <p className="admin-empty-state">No accounts to manage.</p>}
     </section>
 
+    <NotificationSettings />
+
     <section className="panel admin-panel">
-      <div className="section-heading"><div><h2>Security and access history</h2><p>Search all retained history by date, event, actor, account, or event details. This view does not delete history.</p></div></div>
+      <div className="section-heading"><div><h2>Security and access history</h2><p>Performed by identifies who acted; affected account identifies the user changed, when recorded. Payroll entries remain listed; details require the Payroll role in this view.</p></div></div>
       <form className="admin-audit-filters" onSubmit={(event) => void applyAuditFilters(event)}>
-        <label>Search history<input type="search" maxLength={160} placeholder="Event, person, or details" value={auditFilters.query} onChange={(event) => setAuditFilters((old) => ({ ...old, query: event.target.value }))} /></label>
+        <label>Search history<input type="search" maxLength={160} placeholder={canViewPayroll ? "Event, person, or details" : "Payroll only: use the other filters"} disabled={!canViewPayroll} value={canViewPayroll ? auditFilters.query : ""} onChange={(event) => setAuditFilters((old) => ({ ...old, query: event.target.value }))} /></label>
         <label>From<input type="date" value={auditFilters.from} onChange={(event) => setAuditFilters((old) => ({ ...old, from: event.target.value }))} /></label>
         <label>To<input type="date" value={auditFilters.to} onChange={(event) => setAuditFilters((old) => ({ ...old, to: event.target.value }))} /></label>
         <label>Event<input type="search" maxLength={160} placeholder="For example: payroll" value={auditFilters.event} onChange={(event) => setAuditFilters((old) => ({ ...old, event: event.target.value }))} /></label>
-        <label>Actor<input type="search" maxLength={160} placeholder="Name or email" value={auditFilters.actor} onChange={(event) => setAuditFilters((old) => ({ ...old, actor: event.target.value }))} /></label>
-        <label>Account<input type="search" maxLength={160} placeholder="Name, email, or ID" value={auditFilters.account} onChange={(event) => setAuditFilters((old) => ({ ...old, account: event.target.value }))} /></label>
+        <label>Performed by<input type="search" maxLength={160} placeholder="Name or email" value={auditFilters.actor} onChange={(event) => setAuditFilters((old) => ({ ...old, actor: event.target.value }))} /></label>
+        <label>Affected account<input type="search" maxLength={160} placeholder="Name, email, or ID" value={auditFilters.account} onChange={(event) => setAuditFilters((old) => ({ ...old, account: event.target.value }))} /></label>
         <div className="admin-audit-filter-actions"><button className="primary" type="submit" disabled={auditBusy}>Apply filters</button><button className="secondary" type="button" onClick={() => void clearAuditFilters()} disabled={auditBusy}>Clear</button></div>
       </form>
       {auditBusy && <p className="admin-audit-updating" role="status">Updating security history...</p>}
       <div className="table-scroll admin-audit-scroll" aria-busy={auditBusy}>
         <table className="records-table admin-audit-table">
-          <thead><tr><th>When</th><th>Actor</th><th>Event</th><th>Account</th><th>Details</th></tr></thead>
-          <tbody>{audit.events.map((event) => <tr key={event.id}>
+          <thead><tr><th>When</th><th>Performed by</th><th>Event</th><th>Affected account</th><th>Details</th></tr></thead>
+          <tbody>{audit.events.map((event) => event.payrollOnly || (!canViewPayroll && !isAdministrativeAuditEvent(event.eventType)) ? <tr key={event.id}><td><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time></td><td colSpan={4}><span className="admin-audit-muted">Payroll only</span></td></tr> : <tr key={event.id}>
             <td><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time></td>
             <td><strong>{event.actorName}</strong>{event.actorEmail && <small>{event.actorEmail}</small>}</td>
             <td><code className="admin-audit-event">{event.eventType}</code></td>

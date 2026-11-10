@@ -1,0 +1,23 @@
+# TrueNAS Docker Apps template: a prebuilt image, one app, fresh host-path data.
+# Confirmed target: TrueNAS 25.10.0.1 at 192.168.203.180. Port/dataset are unset.
+services:
+  expense-report:
+    image: ${EXPENSE_REPORT_IMAGE:?Set the built image reference available to TrueNAS}
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${TRUENAS_HOST_IP:-192.168.203.180}:${EXPENSE_REPORT_HOST_PORT:?Set the unused host port}:3000"
+    environment:
+      APP_PUBLIC_ORIGIN: ${APP_PUBLIC_ORIGIN:?Set the exact employee-facing HTTP origin}
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:?Supply the persistent session secret at runtime}
+      BT_AUTH_BASE_URL: http://192.168.203.238:3210
+      BT_AUTH_JWKS_URL: http://192.168.203.238:3210/.well-known/jwks.json
+      BT_AUTH_ISSUER: http://auth.biztechro.com
+      EXPENSE_REPORT_DB_PATH: /data/expense-report.sqlite
+      FIRST_ADMIN_BOOTSTRAP_TOKEN: ${FIRST_ADMIN_BOOTSTRAP_TOKEN:-}
+    volumes:
+      - type: bind
+        source: ${EXPENSE_REPORT_DATASET_PATH:?Set the pre-created absolute TrueNAS dataset path}
+        target: /data
+        bind:
+          create_host_path: false

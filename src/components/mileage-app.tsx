@@ -1,8 +1,18 @@
 "use client";
+import { useFormMemory } from "@/components/form-memory";
+import VehicleManager from "@/components/vehicle-manager";
 import PayPeriodNote from "@/components/pay-period-note";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import {
+  Copy,
   Download,
   FileUp,
   Pencil,
@@ -12,6 +22,8 @@ import {
   X,
 } from "lucide-react";
 import {
+  withLegacyVehicle,
+  tripVehicleLabel,
   annualMileageComplete,
   annualMileageInputSchema,
   dateRangePresets,
@@ -205,6 +217,7 @@ export function ProfileSetup({
 }
 
 type TripForm = {
+  vehicleId: string;
   date: string;
   destination: string;
   businessPurpose: string;
@@ -214,6 +227,7 @@ type TripForm = {
   tolls: string;
 };
 const newTrip = (suggestedStart = ""): TripForm => ({
+  vehicleId: "",
   date: today(),
   destination: "",
   businessPurpose: "",
@@ -224,7 +238,7 @@ const newTrip = (suggestedStart = ""): TripForm => ({
 });
 
 export function Dashboard({
-  state,
+  state: incomingState,
   onChange,
   storageError = "",
   payrollMeta = {},
@@ -232,8 +246,10 @@ export function Dashboard({
   footerNote = "Local browser storage | Download backups regularly | Supports recordkeeping, not tax advice",
   onReport,
   historyContent,
+  memoryUserId,
   embedded = false,
 }: {
+  memoryUserId?: string;
   state: MileageState;
   onChange: (state: MileageState) => void | Promise<void>;
   storageError?: string;
@@ -244,12 +260,32 @@ export function Dashboard({
   historyContent?: ReactNode;
   embedded?: boolean;
 }) {
+  const [legacyId] = useState(newId);
+  const state = useMemo(
+    () => withLegacyVehicle(incomingState, legacyId),
+    [incomingState, legacyId],
+  );
   const itemMeta = (tripId: string) => payrollMeta[tripId] ?? defaultTripMeta();
-  const suggestedStart = useMemo(() => {
-    const tenths = lastTripEndTenths(state.trips);
-    return tenths === null ? "" : tenthsToOdometerInput(tenths);
-  }, [state.trips]);
-  const [form, setForm] = useState<TripForm>(() => newTrip());
+  const [form, setForm] = useState<TripForm>(() => ({
+    ...newTrip(),
+    vehicleId: state.defaultVehicleId ?? "",
+  }));
+  const startFor = (vehicleId: string, trips = state.trips) => {
+    const tenths = lastTripEndTenths(
+      trips.filter((t) => t.vehicleId === vehicleId),
+    );
+    const annual = state.annualMileage.find(
+      (a) =>
+        a.vehicleId === vehicleId && a.year === Number(form.date.slice(0, 4)),
+    );
+    const reading = tenths ?? annual?.opening_tenths ?? null;
+    return reading === null ? "" : tenthsToOdometerInput(reading);
+  };
+  const suggestedStart = startFor(form.vehicleId);
+  const [duplicating, setDuplicating] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const saving = useRef(false);
+  const [saveBusy, setSaveBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Trip | null>(null);
   const [settings, setSettings] = useState(false);
@@ -258,6 +294,26 @@ export function Dashboard({
   const [reportError, setReportError] = useState("");
   const [from, setFrom] = useState(monthStart);
   const [to, setTo] = useState(monthEnd);
+  const memory = useFormMemory(
+    memoryUserId,
+    "mileage",
+    form,
+    setForm,
+    ["destination"],
+    { editing, duplicating },
+    (mode) => {
+      if (
+        mode.editing &&
+        (!state.trips.some((item) => item.id === mode.editing) ||
+          isPayrollLocked(itemMeta(mode.editing)))
+      )
+        return false;
+      setEditing(mode.editing);
+      setDuplicating(mode.duplicating);
+      setConfirmed(false);
+      return true;
+    },
+  );
   const formRef = useRef<HTMLFormElement>(null);
   useEffect(() => {
     if (!editing && !form.start && suggestedStart) {
@@ -275,11 +331,29 @@ export function Dashboard({
     /^\d+(\.\d)?$/.test(form.start) && /^\d+(\.\d)?$/.test(form.end)
       ? Math.round(Number(form.end) * 10) - Math.round(Number(form.start) * 10)
       : 0;
-  const setField = (field: keyof TripForm, value: string) =>
-    setForm((current) => ({ ...current, [field]: value }));
+  const setField = (field: keyof TripForm, value: string) => {
+    memory.touch();
+    setConfirmed(false);
+    setForm((current) =>
+      field === "vehicleId"
+        ? { ...current, vehicleId: value, start: startFor(value), end: "" }
+        : { ...current, [field]: value },
+    );
+  };
   const reset = (trips = state.trips) => {
-    const tenths = lastTripEndTenths(trips);
-    setForm(newTrip(tenths === null ? "" : tenthsToOdometerInput(tenths)));
+    const vehicleId = state.vehicles?.some(
+      (v) => v.id === form.vehicleId && !v.retired,
+    )
+      ? form.vehicleId
+      : (state.defaultVehicleId ?? "");
+    memory.clear();
+    setDuplicating(false);
+    setConfirmed(false);
+    setForm({
+      ...newTrip(startFor(vehicleId, trips)),
+      vehicleId,
+      destination: memoryUserId ? form.destination : "",
+    });
     setEditing(null);
     setError("");
   };
@@ -288,11 +362,22 @@ export function Dashboard({
       setForm(newTrip(suggestedStart));
       setEditing(null);
       setError("");
-      setMessage("This trip was locked by payroll and can no longer be edited.");
+      setMessage(
+        "This trip was locked by payroll and can no longer be edited.",
+      );
     }
   }, [editing, payrollMeta, suggestedStart]);
   const saveTrip = async (event: FormEvent) => {
     event.preventDefault();
+    if (saving.current) return;
+    if (duplicating && !confirmed) {
+      setError(
+        "Confirm the new date, distance and costs before saving the duplicate.",
+      );
+      return;
+    }
+    saving.current = true;
+    setSaveBusy(true);
     setError("");
     setMessage("");
     try {
@@ -309,26 +394,50 @@ export function Dashboard({
       const old = editing
         ? state.trips.find((trip) => trip.id === editing)
         : undefined;
+      const vehicle = state.vehicles?.find((v) => v.id === form.vehicleId);
+      if (!vehicle || (vehicle.retired && old?.vehicleId !== vehicle.id))
+        return setError("Choose an active vehicle for this trip.");
       const trip: Trip = {
         id: editing ?? newId(),
         ...parsed.data,
+        vehicleName:
+          old?.vehicleId === vehicle.id
+            ? (old.vehicleName ?? vehicle.description)
+            : vehicle.description,
+        vehicleBusinessUseStartDate:
+          old?.vehicleId === vehicle.id
+            ? (old.vehicleBusinessUseStartDate ?? vehicle.businessUseStartDate)
+            : vehicle.businessUseStartDate,
         createdAt: old?.createdAt ?? new Date().toISOString(),
       };
-      const trips = [...state.trips.filter((item) => item.id !== trip.id), trip];
+      const trips = [
+        ...state.trips.filter((item) => item.id !== trip.id),
+        trip,
+      ];
       const saveResult = onChange({
         ...state,
         trips,
       });
       if (saveResult && typeof saveResult.then === "function") await saveResult;
+      memory.remember();
       setMessage(editing ? "Trip updated." : "Trip saved.");
       reset(trips);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save this trip.");
+      setError(
+        err instanceof Error ? err.message : "Could not save this trip.",
+      );
+    } finally {
+      saving.current = false;
+      setSaveBusy(false);
     }
   };
   const editTrip = (trip: Trip) => {
     if (isPayrollLocked(itemMeta(trip.id))) return;
+    memory.touch();
+    setDuplicating(false);
+    setConfirmed(false);
     setForm({
+      vehicleId: trip.vehicleId ?? "",
       date: trip.date,
       destination: trip.destination,
       businessPurpose: trip.businessPurpose,
@@ -339,6 +448,30 @@ export function Dashboard({
     });
     setEditing(trip.id);
     setError("");
+    formRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+  const duplicateTrip = (trip: Trip) => {
+    memory.touch();
+    setEditing(null);
+    setDuplicating(true);
+    setConfirmed(false);
+    setError("");
+    setForm({
+      ...newTrip(
+        startFor(
+          state.vehicles?.some((v) => v.id === trip.vehicleId && !v.retired)
+            ? trip.vehicleId!
+            : (state.defaultVehicleId ?? ""),
+        ),
+      ),
+      vehicleId: state.vehicles?.some(
+        (v) => v.id === trip.vehicleId && !v.retired,
+      )
+        ? trip.vehicleId!
+        : (state.defaultVehicleId ?? ""),
+      destination: trip.destination,
+      businessPurpose: trip.businessPurpose,
+    });
     formRef.current?.scrollIntoView({ behavior: "smooth" });
   };
   const reportYear = Number(from.slice(0, 4));
@@ -360,7 +493,9 @@ export function Dashboard({
     try {
       const report = onReport
         ? await onReport(from, to)
-        : new Blob([new Uint8Array(await createReport({ state, from, to }))], { type: "application/pdf" });
+        : new Blob([new Uint8Array(await createReport({ state, from, to }))], {
+            type: "application/pdf",
+          });
       downloadBlob(
         report,
         `${safeFilenamePart(state.profile!.driverName)}-mileage-${from}-${to}.pdf`,
@@ -373,26 +508,44 @@ export function Dashboard({
   };
   return (
     <div className="app-shell">
-      {!embedded && <header className="topbar">
-        <Brand />
-        <div className="header-right">
-          <div className="user-name">
-            {state.profile?.driverName}
-            <small>{state.profile?.vehicleDescription}</small>
+      {!embedded && (
+        <header className="topbar">
+          <Brand />
+          <div className="header-right">
+            <div className="user-name">
+              {state.profile?.driverName}
+              <small>{state.profile?.vehicleDescription}</small>
+            </div>
+            <button className="secondary" onClick={() => setSettings(true)}>
+              <Settings size={17} /> Settings
+            </button>
           </div>
-          <button className="secondary" onClick={() => setSettings(true)}>
-            <Settings size={17} /> Settings
-          </button>
-        </div>
-      </header>}
+        </header>
+      )}
       <main className="workspace">
         <div className="page-heading">
           <div>
             <p className="section-kicker">BUSINESS MILEAGE RECORD</p>
             <h1>Mileage log</h1>
-            <p>{embedded ? [state.profile?.driverName, state.profile?.vehicleDescription].filter(Boolean).join(" · ") : state.profile?.businessName}</p>
+            <p>
+              {embedded
+                ? [state.profile?.driverName, state.profile?.vehicleDescription]
+                    .filter(Boolean)
+                    .join(" · ")
+                : state.profile?.businessName}
+            </p>
           </div>
-          {embedded ? <button type="button" className="secondary" onClick={() => setSettings(true)}><Settings size={17} /> Settings</button> : <div className="storage-pill">{storageLabel}</div>}
+          {embedded ? (
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setSettings(true)}
+            >
+              <Settings size={17} /> Settings
+            </button>
+          ) : (
+            <div className="storage-pill">{storageLabel}</div>
+          )}
         </div>
         <section className="summary-grid">
           <article>
@@ -453,7 +606,30 @@ export function Dashboard({
                 <p>Record each completed business trip.</p>
               </div>
             </div>
+            {state.vehicleMigrationWarning && (
+              <p role="alert">{state.vehicleMigrationWarning}</p>
+            )}
+            {memory.notice}
             <form ref={formRef} onSubmit={saveTrip}>
+              <label>
+                Trip vehicle
+                <select
+                  required
+                  className="vehicle-select"
+                  value={form.vehicleId}
+                  onChange={(e) => setField("vehicleId", e.target.value)}
+                >
+                  <option value="">Choose a vehicle</option>
+                  {state.vehicles
+                    ?.filter((v) => !v.retired || v.id === form.vehicleId)
+                    .map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.description}
+                        {v.retired ? " (retired)" : ""}
+                      </option>
+                    ))}
+                </select>
+              </label>
               <label>
                 Date
                 <input
@@ -532,12 +708,27 @@ export function Dashboard({
                 </p>
               )}
               <div className="form-actions">
-                <button className="primary">
+                {duplicating && (
+                  <label className="duplicate-confirm">
+                    <input
+                      type="checkbox"
+                      checked={confirmed}
+                      onChange={(e) => setConfirmed(e.target.checked)}
+                    />
+                    I confirm the new date, distance and costs are accurate.
+                  </label>
+                )}
+                <button className="primary" disabled={saveBusy}>
                   {editing ? "Update trip" : "Save trip"}
                 </button>
-                {editing && (
-                  <button type="button" className="secondary" onClick={() => reset()}>
-                    Cancel editing
+                {(editing || duplicating) && (
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={saveBusy}
+                    onClick={() => reset()}
+                  >
+                    {duplicating ? "Cancel duplicate" : "Cancel editing"}
                   </button>
                 )}
               </div>
@@ -605,58 +796,69 @@ export function Dashboard({
                   const locked = isPayrollLocked(itemMeta(trip.id));
                   const lockLabel = payrollLockLabel(itemMeta(trip.id));
                   return (
-                  <article
-                    className={locked ? "trip-row payroll-locked-row" : "trip-row"}
-                    key={trip.id}
-                  >
-                    <div className="trip-date">
-                      {new Date(`${trip.date}T12:00:00`).toLocaleDateString(
-                        "en-US",
-                        { month: "short", day: "numeric", year: "numeric" },
-                      )}
-                    </div>
-                    <div className="trip-detail">
-                      <strong>{trip.businessPurpose}</strong>
-                      <span>{trip.destination}</span>
-                      <small>
-                        {formatMiles(trip.start_tenths)} →{" "}
-                        {formatMiles(trip.end_tenths)} · Expenses{" "}
-                        {formatDollars(trip.parking_cents + trip.tolls_cents)}
-                        {lockLabel ? ` · ${lockLabel}` : ""}
-                      </small>
-                    </div>
-                    <strong className="trip-miles">
-                      {formatMiles(trip.end_tenths - trip.start_tenths)} mi
-                    </strong>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        aria-label={`Edit ${trip.businessPurpose}`}
-                        disabled={locked}
-                        title={
-                          locked
-                            ? "Locked after payroll marked this trip processed or paid"
-                            : undefined
-                        }
-                        onClick={() => editTrip(trip)}
-                      >
-                        <Pencil size={15} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${trip.businessPurpose}`}
-                        disabled={locked}
-                        title={
-                          locked
-                            ? "Locked after payroll marked this trip processed or paid"
-                            : undefined
-                        }
-                        onClick={() => setDeleting(trip)}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </div>
-                  </article>
+                    <article
+                      className={
+                        locked ? "trip-row payroll-locked-row" : "trip-row"
+                      }
+                      key={trip.id}
+                    >
+                      <div className="trip-date">
+                        {new Date(`${trip.date}T12:00:00`).toLocaleDateString(
+                          "en-US",
+                          { month: "short", day: "numeric", year: "numeric" },
+                        )}
+                      </div>
+                      <div className="trip-detail">
+                        <strong>{trip.businessPurpose}</strong>
+                        <span>{trip.destination}</span>
+                        <small>Vehicle: {tripVehicleLabel(state, trip)}</small>
+                        <small>
+                          {formatMiles(trip.start_tenths)} →{" "}
+                          {formatMiles(trip.end_tenths)} · Expenses{" "}
+                          {formatDollars(trip.parking_cents + trip.tolls_cents)}
+                          {lockLabel ? ` · ${lockLabel}` : ""}
+                        </small>
+                      </div>
+                      <strong className="trip-miles">
+                        {formatMiles(trip.end_tenths - trip.start_tenths)} mi
+                      </strong>
+                      <div className="row-actions">
+                        <button
+                          type="button"
+                          aria-label={`Duplicate ${trip.businessPurpose}`}
+                          disabled={saveBusy}
+                          onClick={() => duplicateTrip(trip)}
+                        >
+                          <Copy size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Edit ${trip.businessPurpose}`}
+                          disabled={locked || saveBusy}
+                          title={
+                            locked
+                              ? "Locked after payroll marked this trip processed or paid"
+                              : undefined
+                          }
+                          onClick={() => editTrip(trip)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Delete ${trip.businessPurpose}`}
+                          disabled={locked || saveBusy}
+                          title={
+                            locked
+                              ? "Locked after payroll marked this trip processed or paid"
+                              : undefined
+                          }
+                          onClick={() => setDeleting(trip)}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    </article>
                   );
                 })}
               </div>
@@ -700,11 +902,16 @@ export function Dashboard({
                 ...state,
                 trips: state.trips.filter((trip) => trip.id !== deleting.id),
               });
-              if (saveResult && typeof saveResult.then === "function") await saveResult;
+              if (saveResult && typeof saveResult.then === "function")
+                await saveResult;
               setDeleting(null);
               if (editing === deleting.id) reset();
             } catch (reason) {
-              setError(reason instanceof Error ? reason.message : "Could not delete this trip.");
+              setError(
+                reason instanceof Error
+                  ? reason.message
+                  : "Could not delete this trip.",
+              );
             }
           }}
         />
@@ -726,8 +933,11 @@ function SettingsPanel({
 }) {
   const [profile, setProfile] = useState(state.profile!);
   const current = new Date().getFullYear();
+  const [annualVehicle, setAnnualVehicle] = useState(
+    state.defaultVehicleId ?? "",
+  );
   const initialAnnual = state.annualMileage.find(
-    (item) => item.year === current,
+    (item) => item.year === current && item.vehicleId === annualVehicle,
   );
   const [year, setYear] = useState(current);
   const [opening, setOpening] = useState(
@@ -752,8 +962,10 @@ function SettingsPanel({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, clear, pendingImport]);
-  const selectYear = (nextYear: number) => {
-    const record = state.annualMileage.find((item) => item.year === nextYear);
+  const selectYear = (nextYear: number, vehicleId = annualVehicle) => {
+    const record = state.annualMileage.find(
+      (item) => item.year === nextYear && item.vehicleId === vehicleId,
+    );
     setYear(nextYear);
     setOpening(
       record?.opening_tenths == null ? "" : String(record.opening_tenths / 10),
@@ -769,15 +981,30 @@ function SettingsPanel({
         parsed.error.issues[0]?.message ?? "Complete the profile.",
       );
     try {
-      const saveResult = onChange({ ...state, profile: parsed.data });
+      const saveResult = onChange({
+        ...state,
+        profile: parsed.data,
+        vehicles: state.vehicles?.map((v) =>
+          v.id === state.defaultVehicleId
+            ? {
+                ...v,
+                description: parsed.data.vehicleDescription,
+                businessUseStartDate: parsed.data.businessUseStartDate,
+              }
+            : v,
+        ),
+      });
       if (saveResult && typeof saveResult.then === "function") await saveResult;
       setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not save profile.");
+      setError(
+        reason instanceof Error ? reason.message : "Could not save profile.",
+      );
     }
   };
   const saveAnnual = async () => {
     const parsed = annualMileageInputSchema.safeParse({
+      vehicleId: annualVehicle || undefined,
       year,
       opening,
       closing,
@@ -790,14 +1017,20 @@ function SettingsPanel({
       const saveResult = onChange({
         ...state,
         annualMileage: [
-          ...state.annualMileage.filter((item) => item.year !== year),
+          ...state.annualMileage.filter(
+            (item) => item.year !== year || item.vehicleId !== annualVehicle,
+          ),
           parsed.data,
         ],
       });
       if (saveResult && typeof saveResult.then === "function") await saveResult;
       setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not save annual mileage.");
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Could not save annual mileage.",
+      );
     }
   };
   const importBackup = async (file?: File) => {
@@ -826,7 +1059,11 @@ function SettingsPanel({
       setPendingImport(null);
       setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not import this backup.");
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Could not import this backup.",
+      );
     }
   };
   return (
@@ -863,8 +1100,33 @@ function SettingsPanel({
             Save profile changes
           </button>
         </section>
+        <VehicleManager
+          state={state}
+          onChange={async (next) => {
+            await onChange(next);
+            setProfile(next.profile!);
+          }}
+        />
         <section>
           <h3>Annual odometer readings</h3>
+          <label>
+            Annual readings vehicle
+            <select
+              className="vehicle-select"
+              value={annualVehicle}
+              onChange={(e) => {
+                setAnnualVehicle(e.target.value);
+                selectYear(year, e.target.value);
+              }}
+            >
+              {state.vehicles?.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.description}
+                  {v.retired ? " (retired)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
           <p>
             Opening and closing/current readings substantiate total annual
             vehicle mileage. The closing/current reading can be added later, but

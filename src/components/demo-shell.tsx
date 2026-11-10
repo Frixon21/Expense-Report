@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import ThemePicker from "@/components/theme-picker";
 import { Receipt, Route } from "lucide-react";
 import { Dashboard } from "@/components/mileage-app";
 import ExpenseDashboard from "@/components/expense-dashboard";
@@ -36,7 +37,8 @@ export default function DemoShell() {
   const [ready, setReady] = useState(false);
   const [org, setOrg] = useState<DemoOrg | null>(null);
   const [view, setView] = useState<ViewMode>("employee");
-  const [employeeModule, setEmployeeModule] = useState<EmployeeModule>("mileage");
+  const [employeeModule, setEmployeeModule] =
+    useState<EmployeeModule>("mileage");
   const [employeeId, setEmployeeId] = useState("emp-alex");
   const [storageError, setStorageError] = useState("");
 
@@ -142,6 +144,7 @@ export default function DemoShell() {
           Demo preview — no login. Changes save in this browser only.
         </div>
         <div className="demo-controls">
+          <ThemePicker />
           <div className="view-toggle" role="tablist" aria-label="Demo view">
             <button
               type="button"

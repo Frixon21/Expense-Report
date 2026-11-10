@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Route } from "lucide-react";
+import ThemePicker from "@/components/theme-picker";
 import ExpenseDashboard from "@/components/expense-dashboard";
 import AdminWorkspace from "@/components/admin-workspace";
 import PayrollWorkspace from "@/components/payroll-workspace";
@@ -10,6 +11,7 @@ import type { Expense } from "@/lib/expense";
 import type { TripPayrollMeta } from "@/lib/demo-types";
 import type { MileageState, Profile } from "@/lib/model";
 import type { Role } from "@/lib/server/db";
+import { clearUserDrafts } from "@/components/form-memory";
 import { clientJson } from "@/lib/client-json";
 
 type AppUser = {
@@ -21,7 +23,7 @@ type AppUser = {
 };
 
 type AppAuth = { authenticated: false } | { authenticated: true; user: AppUser };
-type OwnHistory = Array<{ id: string; action: string; recordType: string; recordId: string; createdAt: string; actorName: string; reason: string | null; details: unknown }>;
+type OwnHistory = Array<{ id: string; action: string; recordType: string; recordId: string; createdAt: string; fromStatus?: string | null; toStatus?: string | null; actorName: string; reason: string | null; details: unknown }>;
 type ExpenseRecord = Expense & { status?: string; everProcessed?: boolean };
 type Snapshot = { user: { id: string; displayName: string; email: string | null; roles: Role[] }; state: MileageState; expenses: ExpenseRecord[]; history: OwnHistory };
 type View = "employee" | "payroll" | "admin";
@@ -60,7 +62,7 @@ export default function SecureShell() {
     if (signal?.aborted) throw new DOMException("Request cancelled.", "AbortError");
     setAuth(next);
     if (next.authenticated && next.user.accessStatus === "active" && !next.user.roles.includes("employee") && next.user.roles.some((role) => role === "payroll" || role === "super_admin")) {
-      setView("payroll");
+      setView(next.user.roles.includes("super_admin") ? "admin" : "payroll");
     }
     return next;
   };
@@ -108,7 +110,7 @@ export default function SecureShell() {
       setPassword("");
       setAuth({ authenticated: true, user: next.user });
       if (next.user.roles.includes("employee")) await loadSnapshot();
-      if (!next.user.roles.includes("employee") && next.user.roles.includes("payroll")) setView("payroll");
+      if (!next.user.roles.includes("employee")) setView(next.user.roles.includes("super_admin") ? "admin" : next.user.roles.includes("payroll") ? "payroll" : "employee");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not sign in.");
     } finally { setBusy(false); }
@@ -119,6 +121,7 @@ export default function SecureShell() {
     try {
       const response = await fetch("/api/auth/logout", { method: "POST" });
       await readJson(response);
+      if (auth?.authenticated) clearUserDrafts(auth.user.id);
       setCurrentSnapshot(null);
       setAuth({ authenticated: false });
       setPassword(""); setBootstrapToken(""); setView("employee");
@@ -185,7 +188,7 @@ export default function SecureShell() {
     <button type="button" className="secondary" onClick={() => setSessionAttempt((value) => value + 1)}>Retry session check</button>
   </> : <p role="status">Checking your app session.</p>}</div>;
   if (!auth.authenticated) return <main className="setup-page"><div className="setup-wrap">
-    <a className="brand" href="/" aria-label="Biztech Expense Report home"><span className="brand-icon"><Route size={22} /></span><span>Biztech<small>EXPENSE REPORT</small></span></a>
+    <div className="setup-brand-row"><a className="brand" href="/" aria-label="Biztech Expense Report home"><span className="brand-icon"><Route size={22} /></span><span>Biztech<small>EXPENSE REPORT</small></span></a><ThemePicker /></div>
     <section className="setup-card"><p className="section-kicker">BT AUTH SIGN IN</p><h1>Sign in to Expense Report</h1><p>Use your existing Biztech credentials. Expense Report creates its own session.</p>
       <form onSubmit={(event) => void login(event)}>
         <label>BT Auth username<input required autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
@@ -199,7 +202,7 @@ export default function SecureShell() {
 
   const user = auth.user;
   const isEmployee = user.roles.includes("employee");
-  const isPayroll = user.roles.includes("payroll") || user.roles.includes("super_admin");
+  const isPayroll = user.roles.includes("payroll");
   const isAdmin = user.roles.includes("super_admin");
 
   if (user.accessStatus === "disabled") return <main className="setup-page"><div className="setup-wrap">
@@ -220,7 +223,7 @@ export default function SecureShell() {
   return <div className="app-shell secure-app-shell">
     <header className="topbar secure-topbar">
       <a className="brand" href="/" aria-label="Biztech Expense Report home"><span className="brand-icon"><Route size={22} /></span><span>Biztech<small>EXPENSE REPORT</small></span></a>
-      <div className="demo-controls">
+      <div className="demo-controls"><ThemePicker />
         <span className="user-name">{user.displayName}<small>{user.email ?? "Verified BT Auth account"}</small></span>
         {isEmployee && <button type="button" aria-pressed={view === "employee"} className={view === "employee" ? "toggle active" : "toggle"} onClick={() => setView("employee")}>My records</button>}
         {isPayroll && <button type="button" aria-pressed={view === "payroll"} className={view === "payroll" ? "toggle active" : "toggle"} onClick={() => setView("payroll")}>Payroll</button>}
@@ -234,20 +237,20 @@ export default function SecureShell() {
     </header>
     {error && view !== "employee" && <p className="error global-message" role="alert">{error}</p>}
     {view === "employee" && isEmployee && (snapshot ? <>
-      {!snapshot.state.profile ? <ProfileSetup embedded onSave={async (profile: Profile) => { await saveSnapshot({ state: { ...snapshot.state, profile } }); }} error={error} storageNote="Your records are stored on the shared Biztech server." historyContent={<HistoryPanel history={snapshot.history} />} /> : module === "mileage" ? <Dashboard embedded
-        key={`${user.id}-mileage`} state={snapshot.state} onChange={onMileageChange} storageError={error} storageLabel="Saved to Biztech" footerNote="Shared Biztech server storage | Supports recordkeeping, not tax advice" onReport={downloadMileageReport}
-        historyContent={<HistoryPanel history={snapshot.history} />}
+      {!snapshot.state.profile ? <ProfileSetup embedded onSave={async (profile: Profile) => { await saveSnapshot({ state: { ...snapshot.state, profile } }); }} error={error} storageNote="Your records are stored on the shared Biztech server." historyContent={<HistoryPanel history={snapshot.history} snapshot={snapshot} />} /> : module === "mileage" ? <Dashboard embedded
+        memoryUserId={user.id} key={`${user.id}-mileage`} state={snapshot.state} onChange={onMileageChange} storageError={error} storageLabel="Saved to Biztech" footerNote="Shared Biztech server storage | Supports recordkeeping, not tax advice" onReport={downloadMileageReport}
+        historyContent={<HistoryPanel history={snapshot.history} snapshot={snapshot} />}
         payrollMeta={Object.fromEntries(snapshot.state.trips.map((trip) => {
           const row = trip as typeof trip & { status?: string; processedRateCentsPerMile?: number | null };
           return [trip.id, { processed: ["Processed", "Paid", "Voided"].includes(row.status ?? ""), paid: row.status === "Paid", processedRateCentsPerMile: row.processedRateCentsPerMile } satisfies TripPayrollMeta];
         }))}
       /> : <ExpenseDashboard
-        key={`${user.id}-expenses`} expenses={snapshot.expenses} onChange={onExpenseChange} storageError={error} storageLabel="Saved to Biztech" historyContent={<HistoryPanel history={snapshot.history} />}
+        memoryUserId={user.id} key={`${user.id}-expenses`} expenses={snapshot.expenses} onChange={onExpenseChange} storageError={error} storageLabel="Saved to Biztech" historyContent={<HistoryPanel history={snapshot.history} snapshot={snapshot} />}
         payrollMeta={Object.fromEntries(snapshot.expenses.map((expense) => [expense.id, { processed: ["Processed", "Paid", "Voided"].includes(expense.status ?? ""), paid: expense.status === "Paid" }]))}
       />}
     </> : <main className="workspace"><p>{error || "Loading your records..."}</p></main>)}
     {view === "payroll" && isPayroll && <PayrollWorkspace isAdmin={isAdmin} />}
-    {view === "admin" && isAdmin && <AdminWorkspace />}
+    {view === "admin" && isAdmin && <AdminWorkspace canViewPayroll={isPayroll} />}
     {view === "employee" && !isEmployee && <main className="workspace"><section className="setup-card"><h1>No employee role assigned</h1><p>Your current roles do not include employee access. Ask a super admin to update your access.</p></section></main>}
     {view === "payroll" && !isPayroll && <main className="workspace"><p>Payroll access is required.</p></main>}
     {view === "admin" && !isAdmin && <main className="workspace"><p>Super admin access is required.</p></main>}
@@ -257,15 +260,16 @@ export default function SecureShell() {
 function BrandHeader({ user, onLogout, busy }: { user: AppUser; onLogout: () => void; busy: boolean }) {
   return <header className="topbar secure-topbar">
     <a className="brand" href="/" aria-label="Biztech Expense Report home"><span className="brand-icon"><Route size={22} /></span><span>Biztech<small>EXPENSE REPORT</small></span></a>
-    <div className="demo-controls"><span className="user-name">{user.displayName}<small>{user.email ?? "Verified BT Auth account"}</small></span><button type="button" className="secondary" disabled={busy} onClick={() => void onLogout()}>Sign out</button></div>
+    <div className="demo-controls"><ThemePicker /><span className="user-name">{user.displayName}<small>{user.email ?? "Verified BT Auth account"}</small></span><button type="button" className="secondary" disabled={busy} onClick={() => void onLogout()}>Sign out</button></div>
   </header>;
 }
 
-function HistoryPanel({ history }: { history: OwnHistory }) {
-  return <section className="panel own-history-panel" aria-label="Your record history"><div className="section-heading"><div><h2>Your record history</h2><p>Business changes affecting your own records.</p></div></div>
-    {history.length ? <ul>{history.slice(0, 30).map((entry) => <li key={entry.id}>
+function HistoryPanel({ history, snapshot }: { history: OwnHistory; snapshot: Snapshot }) {
+  const names = new Map([...snapshot.expenses.map(item => [item.id, item.merchant] as const), ...snapshot.state.trips.map(item => [item.id, item.destination] as const)]);
+  return <section className="panel own-history-panel" aria-label="Your record history"><div className="section-heading"><div><h2>Your record history</h2><p>Recorded status timeline: Submitted, Processed, Paid, reversals and voids.</p></div></div>
+    {history.length ? <ul>{history.map((entry) => <li key={entry.id}>
       <time dateTime={entry.createdAt}>{new Date(entry.createdAt).toLocaleString()}</time>
-      <span>{entry.action} {entry.recordType}</span>
+      <span><strong>{entry.recordType === "trip" ? "Mileage" : entry.recordType} / {names.get(entry.recordId) ?? entry.recordId.slice(0, 8)}</strong> - {entry.action.replaceAll("_", " ")}{entry.toStatus ? `: ${entry.fromStatus ? entry.fromStatus + " to " : ""}${entry.toStatus}` : ""}</span>
       <span>By {entry.actorName}</span>
       {entry.reason && <span>Reason: {entry.reason}</span>}
     </li>)}</ul> : <p className="own-history-empty">No record history yet.</p>}

@@ -16,6 +16,7 @@ export const MAX_SIGNING_KEY_STALENESS_MS = 15 * 60 * 1000;
 
 export const BT_AUTH_DIAGNOSTIC_CODES = [
   "BT_AUTH_CONFIGURATION_INVALID",
+  "BT_AUTH_IDENTITY_CONFLICT",
   "BT_AUTH_UPSTREAM_UNREACHABLE",
   "BT_AUTH_UPSTREAM_UNEXPECTED_STATUS",
   "BT_AUTH_SESSION_COOKIE_MISSING",
@@ -29,6 +30,8 @@ export const BT_AUTH_DIAGNOSTIC_CODES = [
   "BT_AUTH_TOKEN_LIFETIME_INVALID",
   "BT_AUTH_SIGNING_KEY_ID_MISSING",
   "BT_AUTH_TOKEN_INVALID",
+  "BT_AUTH_ACCOUNT_REGISTRATION_FAILED",
+  "BT_AUTH_APP_SESSION_FAILED",
   "BT_AUTH_UNEXPECTED_FAILURE",
 ] as const;
 
@@ -96,17 +99,8 @@ function sessionKey() {
   return authGlobal.__expenseReportSessionKey;
 }
 
-export function requestUsesProtectedTransport(request: Request) {
-  const url = new URL(request.url);
-  if (url.protocol === "https:") return true;
-  if (
-    process.env.AUTH_TRUST_PROXY === "true" &&
-    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https"
-  ) {
-    return true;
-  }
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  return url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(host);
+export function requestUsesHttpTransport(request: Request) {
+  return new URL(request.url).protocol === "http:";
 }
 
 export function requestHasSameOrigin(request: Request) {
@@ -135,11 +129,68 @@ function cookieValue(request: Request, name: string) {
   return null;
 }
 
+// An explicit subject-list or whole-realm trust decision; never infer continuity from email.
+function legacyIssuerForSubject(subject: string): string | null {
+  const legacy = process.env.BT_AUTH_LEGACY_ISSUER;
+  const subjects = process.env.BT_AUTH_LEGACY_SUBJECTS;
+  const realmConfirmed = process.env.BT_AUTH_LEGACY_REALM_CONFIRMED;
+  if (legacy === undefined && subjects === undefined && realmConfirmed === undefined) return null;
+  const current = process.env.BT_AUTH_ISSUER;
+  if (!legacy || !current || legacy === current || legacy !== legacy.trim()) throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
+  configuredUrl(legacy, "BT_AUTH_LEGACY_ISSUER");
+  if (realmConfirmed !== undefined) {
+    // This trusts continuity of the entire subject namespace, not just known accounts.
+    // Reject ambiguous mode selection and truthy spellings rather than broadening silently.
+    if (realmConfirmed !== "true" || subjects !== undefined) throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
+    return legacy;
+  }
+  let approved: unknown;
+  try { approved = JSON.parse(subjects ?? ""); } catch { throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID"); }
+  if (!Array.isArray(approved) || approved.length === 0 || approved.some((value) => typeof value !== "string" || !value.trim() || value !== value.trim() || value === "*")) throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
+  return approved.includes(subject) ? legacy : null;
+}
+
+function providerMatchesUser(issuer: string, subject: string, user: AppUser) {
+  if (subject !== user.subject) return false;
+  const current = process.env.BT_AUTH_ISSUER;
+  const legacy = legacyIssuerForSubject(subject);
+  if (issuer !== current && issuer !== legacy) return false;
+  return issuer === user.issuer || (legacy !== null && issuer === current && user.issuer === legacy);
+}
+
+function aliasedUser(issuer: string, subject: string, email: string | null): AppUser | null {
+  const legacy = legacyIssuerForSubject(subject);
+  if (!legacy || issuer !== process.env.BT_AUTH_ISSUER) return null;
+  const db = database();
+  const original = db.prepare("SELECT id FROM users WHERE issuer = ? AND subject = ?").get(legacy, subject) as { id: string } | undefined;
+  if (!original) return null;
+  const user = getUser(db, original.id)!;
+  if (!email || !user.email || email.toLowerCase() !== user.email.toLowerCase()) throw new BtAuthIntegrationError("BT_AUTH_IDENTITY_CONFLICT");
+  const duplicate = db.prepare("SELECT id FROM users WHERE issuer = ? AND subject = ?").get(issuer, subject) as { id: string } | undefined;
+  if (duplicate) {
+    const candidate = getUser(db, duplicate.id)!;
+    if (candidate.accessStatus !== "pending" || candidate.roles.length || !candidate.email || candidate.email.toLowerCase() !== email.toLowerCase()) throw new BtAuthIntegrationError("BT_AUTH_IDENTITY_CONFLICT");
+    // Keep pending duplicates and their audit/access-request history intact. Never merge data.
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[];
+    const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+    for (const { name } of tables) {
+      if (["sessions", "access_requests", "audit_events"].includes(name)) continue;
+      const references = db.prepare(`PRAGMA foreign_key_list(${quote(name)})`).all() as { table: string; from: string }[];
+      for (const reference of references) {
+        if (reference.table === "users" && db.prepare(`SELECT 1 FROM ${quote(name)} WHERE ${quote(reference.from)} = ? LIMIT 1`).get(candidate.id)) throw new BtAuthIntegrationError("BT_AUTH_IDENTITY_CONFLICT");
+      }
+    }
+    if (db.prepare("SELECT 1 FROM access_requests WHERE reviewed_by = ? OR (user_id = ? AND status != 'pending') LIMIT 1").get(candidate.id, candidate.id)) throw new BtAuthIntegrationError("BT_AUTH_IDENTITY_CONFLICT");
+    if (db.prepare("SELECT 1 FROM audit_events WHERE actor_id = ? AND event_type NOT IN ('access_request_created', 'session_created', 'logout') LIMIT 1").get(candidate.id)) throw new BtAuthIntegrationError("BT_AUTH_IDENTITY_CONFLICT");
+  }
+  return user;
+}
+
 export async function createAppSession(userId: string, proof?: ProviderSessionProof) {
   const db = database();
   if (!proof && process.env.NODE_ENV !== "test") throw new Error("A verified provider session is required.");
   const user = getUser(db, userId);
-  if (proof && (!user || proof.issuer !== user.issuer || proof.subject !== user.subject || !Number.isSafeInteger(proof.expiresAt) || proof.expiresAt <= Date.now() || !proof.keyId || !/^[A-Za-z0-9_-]{43}$/.test(proof.keyThumbprint))) throw new Error("Invalid provider session proof.");
+  if (proof && (!user || !providerMatchesUser(proof.issuer, proof.subject, user) || !Number.isSafeInteger(proof.expiresAt) || proof.expiresAt <= Date.now() || !proof.keyId || !/^[A-Za-z0-9_-]{43}$/.test(proof.keyThumbprint))) throw new Error("Invalid provider session proof.");
   const id = randomUUID();
   const createdAt = new Date();
   const expiresAt = new Date(Math.min(createdAt.getTime() + SESSION_HOURS * 60 * 60 * 1000, proof?.expiresAt ?? Infinity));
@@ -159,22 +210,20 @@ export async function createAppSession(userId: string, proof?: ProviderSessionPr
   return { id, token, expiresAt };
 }
 
-export function appSessionCookie(token: string, request: Request, clear = false, expiresAt?: Date) {
-  const secure = new URL(request.url).protocol === "https:" || process.env.NODE_ENV === "production";
+export function appSessionCookie(token: string, _request: Request, clear = false, expiresAt?: Date) {
   const parts = [
     `${SESSION_COOKIE}=${clear ? "" : encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
   ];
-  if (secure) parts.push("Secure");
   const maxAge = expiresAt ? Math.max(0, Math.min(SESSION_HOURS * 60 * 60, Math.floor((expiresAt.getTime() - Date.now()) / 1000))) : SESSION_HOURS * 60 * 60;
   parts.push(clear ? "Max-Age=0" : `Max-Age=${maxAge}`);
   return parts.join("; ");
 }
 
 export async function currentUser(request: Request, allowPending = false): Promise<AppUser | null> {
-  if (!requestUsesProtectedTransport(request)) return null;
+  if (!requestUsesHttpTransport(request)) return null;
   const token = cookieValue(request, SESSION_COOKIE);
   if (!token) return null;
   try {
@@ -186,15 +235,18 @@ export async function currentUser(request: Request, allowPending = false): Promi
     const row = database().prepare("SELECT * FROM sessions WHERE id = ? AND expires_at > ?")
       .get(payload.sid, Date.now()) as { user_id: string; expires_at: number; provider_expires_at: number | null; provider_key_id: string | null; provider_key_thumbprint: string | null; provider_issuer: string | null; provider_subject: string | null } | undefined;
     if (!row) return null;
-    const user = getUser(database(), row.user_id);
-    if (!user || (!allowPending && user.accessStatus !== "active")) return null;
+    let user = getUser(database(), row.user_id);
+    if (!user) return null;
     if (!(process.env.NODE_ENV === "test" && syntheticSessionIds.has(payload.sid))) {
-      if (!row.provider_expires_at || row.provider_expires_at <= Date.now() || row.provider_issuer !== user.issuer || row.provider_subject !== user.subject || row.provider_issuer !== process.env.BT_AUTH_ISSUER || !row.provider_key_id || !row.provider_key_thumbprint) return null;
+      if (!row.provider_expires_at || row.provider_expires_at <= Date.now() || !row.provider_issuer || !row.provider_subject || !providerMatchesUser(row.provider_issuer, row.provider_subject, user) || !row.provider_key_id || !row.provider_key_thumbprint) return null;
       const { jwks } = await refreshJwks();
       const eligible = jwks.value.keys.filter((key) => key.kid === row.provider_key_id && key.kty === "RSA" && (!key.alg || key.alg === "RS256") && (!key.use || key.use === "sig") && (!key.key_ops || key.key_ops.includes("verify")));
       const fingerprints = await Promise.all(eligible.map((key) => calculateJwkThumbprint(key)));
       if (!fingerprints.includes(row.provider_key_thumbprint) || Date.now() >= row.provider_expires_at || Date.now() >= row.expires_at || Date.now() - jwks.refreshedAt > MAX_SIGNING_KEY_STALENESS_MS) return null;
     }
+    user = aliasedUser(user.issuer, user.subject, user.email) ?? user;
+    if (!allowPending && user.accessStatus !== "active") return null;
+    if (user.accessStatus === "disabled") return null;
     return user;
   } catch {
     return null;
@@ -229,19 +281,7 @@ function configuredUrl(value: string | undefined, label: string) {
   } catch {
     throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
   }
-  if (!new Set(["https:", "http:"]).has(url.protocol)) throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
-  if (url.protocol === "http:") {
-    if (process.env.NODE_ENV === "production") {
-      throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
-    }
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    if (
-      process.env.BT_AUTH_ALLOW_HTTP !== "true" &&
-      !["localhost", "127.0.0.1", "::1"].includes(host)
-    ) {
-      throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
-    }
-  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new BtAuthIntegrationError("BT_AUTH_CONFIGURATION_INVALID");
   return url;
 }
 
@@ -261,7 +301,7 @@ async function fetchJwks(force = false): Promise<JwksRefreshResult> {
     const url = configuredUrl(process.env.BT_AUTH_JWKS_URL, "BT_AUTH_JWKS_URL");
     let response: Response;
     try {
-      response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(8000) });
+      response = await fetch(url, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(8000) });
     } catch {
       throw new BtAuthIntegrationError("BT_AUTH_JWKS_FETCH_FAILED");
     }
@@ -435,7 +475,8 @@ export function registerVerifiedIdentity(identity: VerifiedIdentity) {
   const db = database();
   const now = new Date().toISOString();
   return withTransaction(db, () => {
-    const existing = db.prepare("SELECT id, access_status FROM users WHERE issuer = ? AND subject = ?")
+    const alias = aliasedUser(identity.issuer, identity.subject, identity.email);
+    const existing = alias ? { id: alias.id, access_status: alias.accessStatus } : db.prepare("SELECT id, access_status FROM users WHERE issuer = ? AND subject = ?")
       .get(identity.issuer, identity.subject) as { id: string; access_status: AppUser["accessStatus"] } | undefined;
     let userId = existing?.id;
     if (!userId) {
@@ -458,6 +499,7 @@ export function registerVerifiedIdentity(identity: VerifiedIdentity) {
         }
       }
     }
+    if (alias) recordAudit(db, userId, "identity_issuer_alias_used", userId, { verifiedIssuer: identity.issuer, accountIssuer: alias.issuer, subject: identity.subject });
     return getUser(db, userId)!;
   });
 }

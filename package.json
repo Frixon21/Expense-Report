@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev --webpack --hostname 127.0.0.1",
     "build": "next build",
-    "start": "next start --hostname 127.0.0.1",
+    "start": "next start --hostname 0.0.0.0",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
@@ -21,6 +21,8 @@
     "pdf-lib": "1.17.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "resend": "6.35.0",
+    "sharp": "0.35.5",
     "zod": "4.6.5"
   },
   "devDependencies": {

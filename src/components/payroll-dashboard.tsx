@@ -24,10 +24,7 @@ import {
   payrollLinesForEmployee,
   tripsInPayrollRange,
 } from "@/lib/payroll-lines";
-import {
-  payPeriodAtIndex,
-  payPeriodIndexForDate,
-} from "@/lib/pay-period";
+import { payPeriodAtIndex, payPeriodIndexForDate } from "@/lib/pay-period";
 import {
   categoryLabel,
   expenseReimbursableCents,
@@ -214,7 +211,10 @@ export default function PayrollDashboard({
   );
   const [exportError, setExportError] = useState("");
   const [exportingId, setExportingId] = useState<string | null>(null);
-  const rangePresets = useMemo(() => dateRangePresets().filter((preset) => !preset.payrollDate), []);
+  const rangePresets = useMemo(
+    () => dateRangePresets().filter((preset) => !preset.payrollDate),
+    [],
+  );
   const currentPayPeriodIndex = useMemo(() => payPeriodIndexForDate(), []);
   const autoPayPeriod = useMemo(
     () => payPeriodAtIndex(currentPayPeriodIndex),
@@ -430,7 +430,9 @@ export default function PayrollDashboard({
       </div>
 
       {exportError && (
-        <p className="error global-message" role="alert">{exportError}</p>
+        <p className="error global-message" role="alert">
+          {exportError}
+        </p>
       )}
 
       <section className="payroll-controls panel">
@@ -539,9 +541,7 @@ export default function PayrollDashboard({
         </article>
         <article>
           <span>Est. mileage pay</span>
-          <strong>
-            {formatDollars(Math.round(totals.mileagePay * 100))}
-          </strong>
+          <strong>{formatDollars(Math.round(totals.mileagePay * 100))}</strong>
           <small>
             At ${org.dollarsPerMile.toFixed(2)}/mi · parking/tolls separate
           </small>
@@ -586,8 +586,7 @@ export default function PayrollDashboard({
               const open = expanded === row.employee.id;
               const allProcessed =
                 row.itemCount > 0 && row.processed === row.itemCount;
-              const allPaid =
-                row.itemCount > 0 && row.paid === row.itemCount;
+              const allPaid = row.itemCount > 0 && row.paid === row.itemCount;
               return (
                 <Fragment key={row.employee.id}>
                   <tr>
@@ -610,7 +609,9 @@ export default function PayrollDashboard({
                     </td>
                     <td>
                       <strong>{row.employee.state.profile?.driverName}</strong>
-                      <small>{row.employee.state.profile?.vehicleDescription}</small>
+                      <small>
+                        {row.employee.state.profile?.vehicleDescription}
+                      </small>
                     </td>
                     <td>{row.itemCount}</td>
                     <td>{formatMiles(row.miles)}</td>
@@ -667,7 +668,13 @@ export default function PayrollDashboard({
                               <strong>{trip.date}</strong>
                               <span className="payroll-line-type">Mileage</span>
                               <span>{trip.destination}</span>
-                              <small>{trip.businessPurpose}</small>
+                              <small>
+                                {trip.businessPurpose} | Vehicle:{" "}
+                                {trip.vehicleName ||
+                                  row.employee.state.profile
+                                    ?.vehicleDescription ||
+                                  "Legacy vehicle needs review"}
+                              </small>
                             </td>
                             <td className="payroll-line-metric">—</td>
                             <td className="payroll-line-metric">
@@ -747,11 +754,7 @@ export default function PayrollDashboard({
                             {reimb > 0
                               ? formatExpenseAmount(reimb)
                               : formatExpenseAmount(item.amount)}
-                            {reimb === 0 && (
-                              <small>
-                                company card
-                              </small>
-                            )}
+                            {reimb === 0 && <small>company card</small>}
                           </td>
                           <td className="payroll-line-metric">—</td>
                           <LinePayrollActionsCells

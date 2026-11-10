@@ -1,7 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { Pencil, Trash2, X } from "lucide-react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import { Copy, Pencil, Trash2, X } from "lucide-react";
 import {
   ReceiptViewerModal,
   ReceiptViewButton,
@@ -15,10 +22,12 @@ import {
   formatExpenseAmount,
   paymentMethodLabel,
   readReceiptFile,
+  rotateReceiptImage,
   type Expense,
 } from "@/lib/expense";
 import { dateRangePresets } from "@/lib/model";
 import { newId } from "@/lib/new-id";
+import { useFormMemory } from "@/components/form-memory";
 import PayPeriodNote from "@/components/pay-period-note";
 import { today, monthStart, monthEnd } from "@/lib/date-defaults";
 import {
@@ -57,7 +66,9 @@ export default function ExpenseDashboard({
   payrollMeta = {},
   storageLabel = "Saved in this browser",
   historyContent,
+  memoryUserId,
 }: {
+  memoryUserId?: string;
   expenses: Expense[];
   onChange: (expenses: Expense[]) => void | Promise<void>;
   storageError?: string;
@@ -68,6 +79,10 @@ export default function ExpenseDashboard({
   const itemMeta = (expenseId: string) =>
     payrollMeta[expenseId] ?? defaultTripMeta();
   const [form, setForm] = useState<ExpenseForm>(emptyForm);
+  const [duplicating, setDuplicating] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const saving = useRef(false);
+  const [saveBusy, setSaveBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Expense | null>(null);
   const [from, setFrom] = useState(monthStart);
@@ -82,7 +97,29 @@ export default function ExpenseDashboard({
     null,
   );
   const formRef = useRef<HTMLFormElement>(null);
+  const receiptVersion = useRef(0);
   const receiptInputRef = useRef<HTMLInputElement>(null);
+  const memory = useFormMemory(
+    memoryUserId,
+    "expense",
+    form,
+    setForm,
+    ["category", "paymentMethod"],
+    { editing, duplicating },
+    (mode) => {
+      if (mode.editing) {
+        const saved = expenses.find((item) => item.id === mode.editing);
+        if (!saved || isPayrollLocked(itemMeta(saved.id))) return false;
+        setReceiptFileName(saved.receiptFileName);
+        setReceiptMimeType(saved.receiptMimeType);
+        setReceiptDataUrl(saved.receiptDataUrl);
+      } else clearReceipt();
+      setEditing(mode.editing);
+      setDuplicating(mode.duplicating);
+      setConfirmed(false);
+      return true;
+    },
+  );
   const rangePresets = useMemo(() => dateRangePresets(), []);
 
   const visible = useMemo(
@@ -95,10 +132,14 @@ export default function ExpenseDashboard({
 
   const totalCents = visible.reduce((sum, item) => sum + item.amount, 0);
 
-  const setField = (field: keyof ExpenseForm, value: string) =>
+  const setField = (field: keyof ExpenseForm, value: string) => {
+    memory.touch();
+    setConfirmed(false);
     setForm((current) => ({ ...current, [field]: value }));
+  };
 
   const clearReceipt = () => {
+    receiptVersion.current++;
     setReceiptFileName(undefined);
     setReceiptMimeType(undefined);
     setReceiptDataUrl(undefined);
@@ -106,7 +147,14 @@ export default function ExpenseDashboard({
   };
 
   const reset = () => {
-    setForm(emptyForm());
+    memory.clear();
+    setDuplicating(false);
+    setConfirmed(false);
+    setForm({
+      ...emptyForm(),
+      category: form.category,
+      paymentMethod: form.paymentMethod,
+    });
     setEditing(null);
     setError("");
     clearReceipt();
@@ -123,12 +171,21 @@ export default function ExpenseDashboard({
 
   const saveExpense = async (event: FormEvent) => {
     event.preventDefault();
+    if (saving.current || receiptBusy) return;
+    if (duplicating && !confirmed) {
+      setError("Confirm the new date and amount before saving the duplicate.");
+      return;
+    }
+    saving.current = true;
+    setSaveBusy(true);
     setError("");
     setMessage("");
     try {
       const parsed = expenseInputSchema.safeParse(form);
       if (!parsed.success) {
-        setError(parsed.error.issues[0]?.message ?? "Check the expense details.");
+        setError(
+          parsed.error.issues[0]?.message ?? "Check the expense details.",
+        );
         return;
       }
       if (editing && isPayrollLocked(itemMeta(editing))) {
@@ -157,17 +214,24 @@ export default function ExpenseDashboard({
         record,
       ]);
       if (saveResult && typeof saveResult.then === "function") await saveResult;
+      memory.remember();
       setMessage(editing ? "Expense updated." : "Expense saved.");
       reset();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Could not save this expense.",
       );
+    } finally {
+      saving.current = false;
+      setSaveBusy(false);
     }
   };
 
   const editExpense = (expense: Expense) => {
     if (isPayrollLocked(itemMeta(expense.id))) return;
+    memory.touch();
+    setDuplicating(false);
+    setConfirmed(false);
     setForm({
       date: expense.date,
       category: expense.category,
@@ -186,18 +250,43 @@ export default function ExpenseDashboard({
     formRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const duplicateExpense = (expense: Expense) => {
+    memory.touch();
+    setEditing(null);
+    setDuplicating(true);
+    setConfirmed(false);
+    clearReceipt();
+    setError("");
+    setForm({
+      date: today(),
+      category: expense.category,
+      amount: "",
+      paymentMethod: expense.paymentMethod,
+      merchant: expense.merchant,
+      businessPurpose: expense.businessPurpose,
+      projectOrClient: expense.projectOrClient ?? "",
+      notes: expense.notes ?? "",
+    });
+    formRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
   const onReceiptSelected = async (file: File | undefined) => {
     if (!file) return;
+    const version = ++receiptVersion.current;
     setReceiptBusy(true);
     setError("");
     try {
       const receipt = await readReceiptFile(file);
+      if (version !== receiptVersion.current) return;
       setReceiptFileName(receipt.fileName);
       setReceiptMimeType(receipt.mimeType);
       setReceiptDataUrl(receipt.dataUrl);
     } catch (err) {
-      clearReceipt();
-      setError(err instanceof Error ? err.message : "Could not attach receipt.");
+      if (version !== receiptVersion.current) return;
+      if (receiptInputRef.current) receiptInputRef.current.value = "";
+      setError(
+        err instanceof Error ? err.message : "Could not attach receipt.",
+      );
     } finally {
       setReceiptBusy(false);
     }
@@ -228,7 +317,9 @@ export default function ExpenseDashboard({
       </section>
 
       {storageError && (
-        <p className="error global-message" role="alert">{storageError}</p>
+        <p className="error global-message" role="alert">
+          {storageError}
+        </p>
       )}
       {message && (
         <p className="success" role="status">
@@ -245,9 +336,12 @@ export default function ExpenseDashboard({
             <span className="step">1</span>
             <div>
               <h2>{editing ? "Edit expense" : "Add an expense"}</h2>
-              <p>Date, category, amount, payment method, and business purpose.</p>
+              <p>
+                Date, category, amount, payment method, and business purpose.
+              </p>
             </div>
           </div>
+          {memory.notice}
           <form ref={formRef} onSubmit={saveExpense}>
             <label>
               Date
@@ -266,7 +360,9 @@ export default function ExpenseDashboard({
                 onChange={(e) => setField("category", e.target.value)}
               >
                 {EXPENSE_CATEGORIES.map((item) => (
-                  <option key={item.id} value={item.id}>{item.label}</option>
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
                 ))}
               </select>
             </label>
@@ -289,7 +385,9 @@ export default function ExpenseDashboard({
                   onChange={(e) => setField("paymentMethod", e.target.value)}
                 >
                   {PAYMENT_METHODS.map((item) => (
-                    <option key={item.id} value={item.id}>{item.label}</option>
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
                   ))}
                 </select>
               </label>
@@ -354,6 +452,40 @@ export default function ExpenseDashboard({
                     label="View"
                     onOpen={setViewerReceipt}
                   />
+                  {receiptMimeType?.startsWith("image/") && (
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={receiptBusy || saveBusy}
+                      onClick={async () => {
+                        const version = ++receiptVersion.current;
+                        setReceiptBusy(true);
+                        setError("");
+                        try {
+                          const rotated =
+                            await rotateReceiptImage(receiptDataUrl);
+                          if (version !== receiptVersion.current) return;
+                          setReceiptDataUrl(rotated);
+                          setReceiptMimeType("image/png");
+                          setReceiptFileName(
+                            receiptFileName
+                              .replace(/\.[^.]+$/, "")
+                              .slice(0, 196) + ".png",
+                          );
+                        } catch (reason) {
+                          setError(
+                            reason instanceof Error
+                              ? reason.message
+                              : "Could not rotate receipt.",
+                          );
+                        } finally {
+                          setReceiptBusy(false);
+                        }
+                      }}
+                    >
+                      Rotate attachment
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="secondary receipt-remove"
@@ -365,15 +497,37 @@ export default function ExpenseDashboard({
               )}
             </div>
             {error && (
-              <p className="error" role="alert">{error}</p>
+              <p className="error" role="alert">
+                {error}
+              </p>
             )}
             <div className="form-actions">
-              <button className="primary" type="submit">
+              {duplicating && (
+                <label className="duplicate-confirm">
+                  <input
+                    type="checkbox"
+                    checked={confirmed}
+                    onChange={(e) => setConfirmed(e.target.checked)}
+                  />
+                  I confirm the new date and amount for this duplicate. Attach
+                  its own receipt if needed.
+                </label>
+              )}
+              <button
+                className="primary"
+                type="submit"
+                disabled={saveBusy || receiptBusy}
+              >
                 {editing ? "Update expense" : "Save expense"}
               </button>
-              {editing && (
-                <button type="button" className="secondary" onClick={reset}>
-                  Cancel editing
+              {(editing || duplicating) && (
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={saveBusy || receiptBusy}
+                  onClick={reset}
+                >
+                  {duplicating ? "Cancel duplicate" : "Cancel editing"}
                 </button>
               )}
             </div>
@@ -427,84 +581,94 @@ export default function ExpenseDashboard({
           </div>
           <PayPeriodNote from={from} to={to} />
           {from > to ? (
-            <p className="empty-line">Choose an end date on or after the start date.</p>
+            <p className="empty-line">
+              Choose an end date on or after the start date.
+            </p>
           ) : visible.length ? (
             <div className="trip-list">
               {visible.map((expense) => {
                 const locked = isPayrollLocked(itemMeta(expense.id));
                 const lockLabel = payrollLockLabel(itemMeta(expense.id));
                 return (
-                <article
-                  className={
-                    locked
-                      ? "trip-row expense-row payroll-locked-row"
-                      : "trip-row expense-row"
-                  }
-                  key={expense.id}
-                >
-                  <div className="trip-date">
-                    {new Date(`${expense.date}T12:00:00`).toLocaleDateString(
-                      "en-US",
-                      { month: "short", day: "numeric", year: "numeric" },
-                    )}
-                  </div>
-                  <div className="trip-detail">
-                    <strong>{expense.merchant}</strong>
-                    <span>{categoryLabel(expense.category)}</span>
-                    <small>
-                      {paymentMethodLabel(expense.paymentMethod)}
-                      {expense.projectOrClient
-                        ? ` · ${expense.projectOrClient}`
-                        : ""}
-                      {expense.receiptDataUrl && expense.receiptFileName
-                        ? " · Receipt"
-                        : ""}
-                      {lockLabel ? ` · ${lockLabel}` : ""}
-                    </small>
-                    {expense.receiptDataUrl && expense.receiptFileName && (
-                      <ReceiptViewButton
-                        receipt={{
-                          receiptFileName: expense.receiptFileName,
-                          receiptMimeType: expense.receiptMimeType,
-                          receiptDataUrl: expense.receiptDataUrl,
-                        }}
-                        label="View"
-                        onOpen={setViewerReceipt}
-                      />
-                    )}
-                  </div>
-                  <strong className="trip-miles">
-                    {formatExpenseAmount(expense.amount)}
-                  </strong>
-                  <div className="row-actions">
-                    <button
-                      type="button"
-                      aria-label={`Edit ${expense.merchant}`}
-                      disabled={locked}
-                      title={
-                        locked
-                          ? "Locked after payroll marked this expense processed or paid"
-                          : undefined
-                      }
-                      onClick={() => editExpense(expense)}
-                    >
-                      <Pencil size={15} />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete ${expense.merchant}`}
-                      disabled={locked}
-                      title={
-                        locked
-                          ? "Locked after payroll marked this expense processed or paid"
-                          : undefined
-                      }
-                      onClick={() => setDeleting(expense)}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                </article>
+                  <article
+                    className={
+                      locked
+                        ? "trip-row expense-row payroll-locked-row"
+                        : "trip-row expense-row"
+                    }
+                    key={expense.id}
+                  >
+                    <div className="trip-date">
+                      {new Date(`${expense.date}T12:00:00`).toLocaleDateString(
+                        "en-US",
+                        { month: "short", day: "numeric", year: "numeric" },
+                      )}
+                    </div>
+                    <div className="trip-detail">
+                      <strong>{expense.merchant}</strong>
+                      <span>{categoryLabel(expense.category)}</span>
+                      <small>
+                        {paymentMethodLabel(expense.paymentMethod)}
+                        {expense.projectOrClient
+                          ? ` · ${expense.projectOrClient}`
+                          : ""}
+                        {expense.receiptDataUrl && expense.receiptFileName
+                          ? " · Receipt"
+                          : ""}
+                        {lockLabel ? ` · ${lockLabel}` : ""}
+                      </small>
+                      {expense.receiptDataUrl && expense.receiptFileName && (
+                        <ReceiptViewButton
+                          receipt={{
+                            receiptFileName: expense.receiptFileName,
+                            receiptMimeType: expense.receiptMimeType,
+                            receiptDataUrl: expense.receiptDataUrl,
+                          }}
+                          label="View"
+                          onOpen={setViewerReceipt}
+                        />
+                      )}
+                    </div>
+                    <strong className="trip-miles">
+                      {formatExpenseAmount(expense.amount)}
+                    </strong>
+                    <div className="row-actions">
+                      <button
+                        type="button"
+                        aria-label={`Duplicate ${expense.merchant}`}
+                        disabled={saveBusy || receiptBusy}
+                        onClick={() => duplicateExpense(expense)}
+                      >
+                        <Copy size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Edit ${expense.merchant}`}
+                        disabled={locked || saveBusy || receiptBusy}
+                        title={
+                          locked
+                            ? "Locked after payroll marked this expense processed or paid"
+                            : undefined
+                        }
+                        onClick={() => editExpense(expense)}
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Delete ${expense.merchant}`}
+                        disabled={locked || saveBusy || receiptBusy}
+                        title={
+                          locked
+                            ? "Locked after payroll marked this expense processed or paid"
+                            : undefined
+                        }
+                        onClick={() => setDeleting(expense)}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  </article>
                 );
               })}
             </div>
@@ -546,12 +710,19 @@ export default function ExpenseDashboard({
                     return;
                   }
                   try {
-                    const saveResult = onChange(expenses.filter((item) => item.id !== deleting.id));
-                    if (saveResult && typeof saveResult.then === "function") await saveResult;
+                    const saveResult = onChange(
+                      expenses.filter((item) => item.id !== deleting.id),
+                    );
+                    if (saveResult && typeof saveResult.then === "function")
+                      await saveResult;
                     setDeleting(null);
                     if (editing === deleting.id) reset();
                   } catch (reason) {
-                    setError(reason instanceof Error ? reason.message : "Could not delete this expense.");
+                    setError(
+                      reason instanceof Error
+                        ? reason.message
+                        : "Could not delete this expense.",
+                    );
                   }
                 }}
               >
